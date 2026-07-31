@@ -1,0 +1,19 @@
+{
+  "rules": {
+    "records": {
+      ".read": "auth != null && auth.token.email == 'woxxinsolution12@gmail.com'",
+      ".write": "auth != null && auth.token.email == 'woxxinsolution12@gmail.com'",
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && auth.uid == $uid"
+      }
+    },
+    "users": {
+      ".read": "auth != null && auth.token.email == 'woxxinsolution12@gmail.com'",
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && auth.uid == $uid"
+      }
+    }
+  }
+}

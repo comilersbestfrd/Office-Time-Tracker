@@ -1,0 +1,95 @@
+[
+  {
+    "date": "2026-07-16",
+    "status": "absent",
+    "inTime": null,
+    "outTime": null,
+    "restSessions": [],
+    "restTimeTotal": 0,
+    "activeRestStart": null,
+    "workedHours": 0,
+    "pendingHours": 0,
+    "notes": ""
+  },
+  {
+    "date": "2026-07-23",
+    "status": "absent",
+    "inTime": null,
+    "outTime": null,
+    "restSessions": [],
+    "restTimeTotal": 0,
+    "activeRestStart": null,
+    "workedHours": 0,
+    "pendingHours": 0,
+    "notes": ""
+  },
+  {
+    "date": "2026-07-28",
+    "status": "absent",
+    "inTime": null,
+    "outTime": null,
+    "restSessions": [],
+    "restTimeTotal": 0,
+    "activeRestStart": null,
+    "workedHours": 0,
+    "pendingHours": 0,
+    "notes": ""
+  },
+  {
+    "date": "2026-07-29",
+    "status": "present",
+    "inTime": "2026-07-29T04:12:00.000Z",
+    "outTime": "2026-07-29T13:25:00.000Z",
+    "restSessions": [
+      {
+        "start": "2026-07-29T04:13:00.000Z",
+        "end": "2026-07-29T04:25:00.000Z"
+      }
+    ],
+    "restTimeTotal": 12,
+    "activeRestStart": null,
+    "workedHours": 8.22,
+    "pendingHours": -0.22,
+    "notes": "",
+    "lunchDeduction": 60
+  },
+  {
+    "date": "2026-07-30",
+    "status": "present",
+    "inTime": "2026-07-30T04:09:00.000Z",
+    "outTime": "2026-07-30T13:25:00.000Z",
+    "restSessions": [
+      {
+        "start": "2026-07-30T05:02:23.402Z",
+        "end": "2026-07-30T05:05:23.690Z"
+      },
+      {
+        "start": "2026-07-30T06:08:00.000Z",
+        "end": "2026-07-30T06:12:00.000Z"
+      },
+      {
+        "start": "2026-07-30T10:42:22.224Z",
+        "end": "2026-07-30T10:46:09.495Z"
+      }
+    ],
+    "restTimeTotal": 11,
+    "activeRestStart": null,
+    "workedHours": 8.27,
+    "pendingHours": -0.27,
+    "notes": "",
+    "lunchDeduction": 60
+  },
+  {
+    "date": "2026-07-31",
+    "status": "present",
+    "inTime": "2026-07-31T04:17:00.000Z",
+    "outTime": null,
+    "restSessions": [],
+    "restTimeTotal": 0,
+    "activeRestStart": null,
+    "workedHours": 0.22,
+    "pendingHours": 7.78,
+    "notes": "",
+    "lunchDeduction": 0
+  }
+]
