@@ -7,26 +7,14 @@ import { auth, db } from '@/lib/firebase';
 import { useAdminGuard } from '@/hooks/useAdminGuard';
 import styles from './admin.module.css';
 
+import { DayRecord, Holiday, calculateRecordHours } from '@/lib/calculations';
+
 interface UserProfile {
   email: string;
   displayName: string;
   photoURL: string;
   lastLogin: string;
   username?: string;
-}
-
-interface DayRecord {
-  date: string;
-  status: 'present' | 'absent' | 'weekly-off';
-  inTime: string | null;
-  outTime: string | null;
-  restSessions: any[];
-  restTimeTotal: number;
-  activeRestStart: string | null;
-  workedHours: number;
-  pendingHours: number;
-  lunchDeduction?: number;
-  notes?: string;
 }
 
 interface UserData {
@@ -70,6 +58,11 @@ export default function AdminDashboard() {
   // Selected user filter
   const [selectedUid, setSelectedUid] = useState<string>('all');
 
+  // Holiday states
+  const [holidays, setHolidays] = useState<Holiday[]>([]);
+  const [holidayDateInput, setHolidayDateInput] = useState('');
+  const [holidayNameInput, setHolidayNameInput] = useState('');
+
   // Load user profiles
   useEffect(() => {
     if (!isAdminUser) return;
@@ -78,9 +71,17 @@ export default function AdminDashboard() {
       const data = snap.val() || {};
       const profileMap: Record<string, UserProfile> = {};
       Object.keys(data).forEach((uid) => {
-        if (data[uid]?.profile) {
-          profileMap[uid] = data[uid].profile;
-        }
+        const userNode = data[uid] || {};
+        const profile = userNode.profile || {};
+        
+        // Extract fields from either nested profile node or flat user node
+        profileMap[uid] = {
+          email: profile.email || userNode.email || '',
+          displayName: profile.displayName || userNode.displayName || '',
+          photoURL: profile.photoURL || userNode.photoURL || '',
+          lastLogin: profile.lastLogin || userNode.lastLogin || '',
+          username: profile.username || userNode.username || '',
+        };
       });
       setProfiles(profileMap);
     }, (err) => {
@@ -106,10 +107,11 @@ export default function AdminDashboard() {
       const users: UserData[] = Object.keys(data).map((uid) => {
         const userRecords = data[uid] || {};
         const records: DayRecord[] = Object.values(userRecords);
+        const recalculated = records.map(r => calculateRecordHours(r));
         return {
           uid,
           profile: null,
-          records: records.sort((a, b) => b.date.localeCompare(a.date)),
+          records: recalculated.sort((a, b) => b.date.localeCompare(a.date)),
         };
       });
       setAllUsersData(users);
@@ -121,6 +123,27 @@ export default function AdminDashboard() {
         'Go to Firebase Console → Realtime Database → Rules and add read/write permission for your admin email on the /records node.'
       );
       setLoading(false);
+    });
+    return () => unsub();
+  }, [isAdminUser]);
+
+  // Load holidays
+  useEffect(() => {
+    if (!isAdminUser) return;
+    const holidaysRef = ref(db, 'holidays');
+    const unsub = onValue(holidaysRef, (snap) => {
+      const data = snap.val() || {};
+      const list: Holiday[] = Object.values(data);
+      setHolidays(list.sort((a, b) => b.date.localeCompare(a.date)));
+    }, async (err) => {
+      console.warn('Could not load holidays from Firebase, trying local API:', err);
+      try {
+        const res = await fetch('/api/holidays');
+        const data = await res.json();
+        setHolidays(data.sort((a: Holiday, b: Holiday) => b.date.localeCompare(a.date)));
+      } catch (localErr) {
+        console.error('Failed to load holidays from local API:', localErr);
+      }
     });
     return () => unsub();
   }, [isAdminUser]);
@@ -184,6 +207,63 @@ export default function AdminDashboard() {
     const label = getUserLabel(uid);
     if (!window.confirm(`Delete ALL records for ${label}? This cannot be undone.`)) return;
     await remove(ref(db, `records/${uid}`));
+  };
+
+  const handleAddHoliday = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!holidayDateInput || !holidayNameInput.trim()) {
+      alert('Please specify both Date and Holiday Name!');
+      return;
+    }
+    const holiday: Holiday = {
+      date: holidayDateInput,
+      name: holidayNameInput.trim(),
+    };
+
+    // Update local state instantly for immediate UI feedback
+    setHolidays((prev) => {
+      const filtered = prev.filter((h) => h.date !== holiday.date);
+      return [...filtered, holiday].sort((a, b) => b.date.localeCompare(a.date));
+    });
+
+    try {
+      // Write to Firebase
+      const holidayRef = ref(db, `holidays/${holiday.date}`);
+      await set(holidayRef, holiday);
+      
+      // Sync to local JSON database API
+      await fetch('/api/holidays', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(holiday),
+      });
+
+      setHolidayDateInput('');
+      setHolidayNameInput('');
+    } catch (err: any) {
+      console.error('Error saving holiday:', err);
+      alert(`Failed to save holiday: ${err.message}`);
+    }
+  };
+
+  const handleDeleteHoliday = async (date: string) => {
+    if (!window.confirm(`Delete holiday for ${date}?`)) return;
+
+    // Update local state instantly for immediate UI feedback
+    setHolidays((prev) => prev.filter((h) => h.date !== date));
+
+    try {
+      // Delete from Firebase
+      await set(ref(db, `holidays/${date}`), null);
+      
+      // Sync to local JSON database API
+      await fetch(`/api/holidays/${date}`, {
+        method: 'DELETE',
+      });
+    } catch (err: any) {
+      console.error('Error deleting holiday:', err);
+      alert(`Failed to delete holiday: ${err.message}`);
+    }
   };
 
   if (adminLoading) {
@@ -251,6 +331,74 @@ export default function AdminDashboard() {
           <span className={styles.statNumber}>{totalStats.totalHoursWorked.toFixed(1)}h</span>
           <span className={styles.statLabel}>Hours Worked</span>
         </div>
+      </div>
+
+      {/* Holidays Management */}
+      <div className={styles.userSection} style={{ padding: '1.5rem', marginBottom: '2rem' }}>
+        <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: '1rem', borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: '0.5rem' }}>
+          📅 Manage Public Holidays
+        </h2>
+        
+        <form onSubmit={handleAddHoliday} style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: '1.5rem' }}>
+          <div className={styles.filterGroup}>
+            <label>Holiday Date</label>
+            <input
+              type="date"
+              value={holidayDateInput}
+              onChange={(e) => setHolidayDateInput(e.target.value)}
+              className={styles.dateInput}
+              required
+            />
+          </div>
+          <div className={styles.filterGroup} style={{ flex: '1', minWidth: '200px' }}>
+            <label>Holiday Name</label>
+            <input
+              type="text"
+              placeholder="e.g. Independence Day"
+              value={holidayNameInput}
+              onChange={(e) => setHolidayNameInput(e.target.value)}
+              className={styles.dateInput}
+              style={{ width: '100%' }}
+              required
+            />
+          </div>
+          <button type="submit" className={styles.btnPrimary} style={{ padding: '0.65rem 1.5rem', borderRadius: '8px' }}>
+            ➕ Add Holiday
+          </button>
+        </form>
+
+        {holidays.length === 0 ? (
+          <p style={{ color: '#64748b', fontSize: '0.9rem', margin: 0 }}>No public holidays added yet.</p>
+        ) : (
+          <div className={styles.tableWrapper} style={{ maxHeight: '200px', overflowY: 'auto' }}>
+            <table className={styles.recordsTable}>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Holiday Name</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {holidays.map((h) => (
+                  <tr key={h.date}>
+                    <td className={styles.dateCell}>{h.date}</td>
+                    <td>🎉 {h.name}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className={styles.btnSmallDanger}
+                        onClick={() => handleDeleteHoliday(h.date)}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Filters */}
@@ -348,9 +496,12 @@ export default function AdminDashboard() {
                           <span className={`${styles.statusBadge} ${
                             rec.status === 'present' ? styles.badgePresent :
                             rec.status === 'absent' ? styles.badgeAbsent :
+                            rec.status === 'holiday' ? styles.badgeHoliday :
                             styles.badgeOff
                           }`}>
-                            {rec.status === 'present' ? '✅' : rec.status === 'absent' ? '❌' : '🔵'} {rec.status}
+                            {rec.status === 'present' ? '✅' : 
+                             rec.status === 'absent' ? '❌' : 
+                             rec.status === 'holiday' ? '🎉' : '🔵'} {rec.status}
                           </span>
                         </td>
                         <td>{formatTime(rec.inTime)}</td>

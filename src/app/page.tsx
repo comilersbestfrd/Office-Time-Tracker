@@ -6,43 +6,16 @@ import styles from './page.module.css';
 import { auth, db, googleProvider } from '@/lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { ref, onValue, set, get } from 'firebase/database';
+import { RecordSession, DayRecord, DashboardStats, calculateRecordHours, Holiday } from '@/lib/calculations';
 
 const ADMIN_EMAIL = 'woxxinsolution12@gmail.com';
-
-interface RecordSession {
-  start: string;
-  end: string | null;
-}
-
-interface DayRecord {
-  date: string;
-  status: 'present' | 'absent' | 'weekly-off';
-  inTime: string | null;
-  outTime: string | null;
-  restSessions: RecordSession[];
-  restTimeTotal: number;
-  activeRestStart: string | null;
-  workedHours: number;
-  pendingHours: number;
-  lunchDeduction?: number;
-  notes?: string;
-}
-
-interface DashboardStats {
-  totalWorkDays: number;
-  presentDays: number;
-  absentDays: number;
-  weeklyOffDays: number;
-  requiredHoursTotal: number;
-  hoursWorkedTotal: number;
-  pendingHoursTotal: number;
-}
 
 export default function Home() {
   const router = useRouter();
   // Data States
   const [records, setRecords] = useState<DayRecord[]>([]);
   const recordsRef = useRef<DayRecord[]>([]);
+  const [holidays, setHolidays] = useState<Holiday[]>([]);
 
   useEffect(() => {
     recordsRef.current = records;
@@ -64,9 +37,7 @@ export default function Home() {
   const [liveRestMins, setLiveRestMins] = useState<number>(0);
   const [liveWorkedHoursDecimal, setLiveWorkedHoursDecimal] = useState<number>(0);
 
-  // Scheduler States
-  const [scheduledOutTime, setScheduledOutTime] = useState<Date | null>(null);
-  const [scheduledBreakTime, setScheduledBreakTime] = useState<Date | null>(null);
+
 
   // Auth States
   const [user, setUser] = useState<User | null>(null);
@@ -82,7 +53,7 @@ export default function Home() {
   const [currentMonth, setCurrentMonth] = useState<Date>(new Date());
   const [showModal, setShowModal] = useState<boolean>(false);
   const [modalDate, setModalDate] = useState<string>('');
-  const [modalStatus, setModalStatus] = useState<'present' | 'absent' | 'weekly-off'>('present');
+  const [modalStatus, setModalStatus] = useState<'present' | 'absent' | 'weekly-off' | 'holiday'>('present');
   const [modalInTime, setModalInTime] = useState<string>('09:00');
   const [modalOutTime, setModalOutTime] = useState<string>('17:20');
   const [modalRestTime, setModalRestTime] = useState<number>(20);
@@ -98,14 +69,7 @@ export default function Home() {
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Keep refs of actions updated to avoid stale closure issues in the mount interval
-  const handleClockOutRef = useRef<(() => Promise<void>) | null>(null);
-  const handleStartRestRef = useRef<(() => Promise<void>) | null>(null);
 
-  useEffect(() => {
-    handleClockOutRef.current = handleClockOut;
-    handleStartRestRef.current = handleStartRest;
-  });
 
   // Helper: Get local date string YYYY-MM-DD
   const getTodayDateString = (date = new Date()) => {
@@ -124,11 +88,16 @@ export default function Home() {
     try {
       const recordsRes = await fetch('/api/records');
       const recordsData: DayRecord[] = await recordsRes.json();
-      setRecords(recordsData);
+      const recalculated = recordsData.map(r => calculateRecordHours(r));
+      setRecords(recalculated);
 
       const statsRes = await fetch('/api/stats');
       const statsData: DashboardStats = await statsRes.json();
       setStats(statsData);
+
+      const holidaysRes = await fetch('/api/holidays');
+      const holidaysData: Holiday[] = await holidaysRes.json();
+      setHolidays(holidaysData);
     } catch (error) {
       console.error('Error fetching local data:', error);
     }
@@ -192,10 +161,31 @@ export default function Home() {
       const data = snapshot.val();
       if (data) {
         const list: DayRecord[] = Object.values(data);
-        const sorted = list.sort((a, b) => a.date.localeCompare(b.date));
+        const recalculated = list.map(r => calculateRecordHours(r));
+        const sorted = recalculated.sort((a, b) => a.date.localeCompare(b.date));
         setRecords(sorted);
       } else {
         setRecords([]);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [user]);
+
+  // Listen to holidays in Firebase
+  useEffect(() => {
+    if (!user) return;
+
+    const holidaysDbRef = ref(db, 'holidays');
+    const unsubscribe = onValue(holidaysDbRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const list: Holiday[] = Object.values(data);
+        setHolidays(list);
+      } else {
+        setHolidays([]);
       }
     });
 
@@ -213,41 +203,9 @@ export default function Home() {
     setFilterStartDate(getTodayDateString(firstDay));
     setFilterEndDate(getTodayDateString(today));
 
-    // Load scheduled actions from localStorage on mount
-    const savedOut = localStorage.getItem('scheduledOutTime');
-    const savedBreak = localStorage.getItem('scheduledBreakTime');
-    if (savedOut) setScheduledOutTime(new Date(savedOut));
-    if (savedBreak) setScheduledBreakTime(new Date(savedBreak));
-
     const clockInterval = setInterval(() => {
       const now = new Date();
       setCurrentDateTime(now);
-
-      // Check scheduled clock out
-      const localSavedOut = localStorage.getItem('scheduledOutTime');
-      if (localSavedOut) {
-        const target = new Date(localSavedOut);
-        if (now.getTime() >= target.getTime()) {
-          localStorage.removeItem('scheduledOutTime');
-          setScheduledOutTime(null);
-          if (handleClockOutRef.current) {
-            handleClockOutRef.current();
-          }
-        }
-      }
-
-      // Check scheduled break
-      const localSavedBreak = localStorage.getItem('scheduledBreakTime');
-      if (localSavedBreak) {
-        const target = new Date(localSavedBreak);
-        if (now.getTime() >= target.getTime()) {
-          localStorage.removeItem('scheduledBreakTime');
-          setScheduledBreakTime(null);
-          if (handleStartRestRef.current) {
-            handleStartRestRef.current();
-          }
-        }
-      }
     }, 1000);
 
     // Global keyboard shortcut handler for 'R' to toggle break
@@ -388,49 +346,23 @@ export default function Home() {
     return `${h}h ${m}m`;
   };
 
+  const formatExtraHours = (hours: number): string => {
+    const totalMins = Math.round(hours * 60);
+    if (totalMins < 60) {
+      return `${totalMins}m`;
+    }
+    const h = Math.floor(totalMins / 60);
+    const m = totalMins % 60;
+    return `${h}h ${m}m`;
+  };
+
   // Formatter: ISO DateTime to local string (HH:MM AM/PM)
   const formatISOToTime = (isoString: string | null): string => {
     if (!isoString) return '--:--';
     return new Date(isoString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
-  // Scheduler Actions
-  const scheduleOut = (mins: number) => {
-    const target = new Date(Date.now() + mins * 60 * 1000);
-    setScheduledOutTime(target);
-    localStorage.setItem('scheduledOutTime', target.toISOString());
-  };
 
-  const cancelScheduleOut = () => {
-    setScheduledOutTime(null);
-    localStorage.removeItem('scheduledOutTime');
-  };
-
-  const scheduleBreak = (secs: number) => {
-    const target = new Date(Date.now() + secs * 1000);
-    setScheduledBreakTime(target);
-    localStorage.setItem('scheduledBreakTime', target.toISOString());
-  };
-
-  const cancelScheduleBreak = () => {
-    setScheduledBreakTime(null);
-    localStorage.removeItem('scheduledBreakTime');
-  };
-
-  const getCountdownSeconds = (target: Date | null): number => {
-    if (!target) return 0;
-    const diff = target.getTime() - Date.now();
-    return Math.max(0, Math.ceil(diff / 1000));
-  };
-
-  const getCountdownHMS = (target: Date | null): string => {
-    if (!target) return '00:00';
-    const diff = target.getTime() - Date.now();
-    const totalSecs = Math.max(0, Math.ceil(diff / 1000));
-    const mins = String(Math.floor(totalSecs / 60)).padStart(2, '0');
-    const secs = String(totalSecs % 60).padStart(2, '0');
-    return `${mins}:${secs}`;
-  };
 
   // Clock Actions
   const handleClockIn = async () => {
@@ -451,7 +383,6 @@ export default function Home() {
   };
 
   const handleStartRest = async () => {
-    cancelScheduleBreak();
     const todayStrLocal = getTodayDateString();
     const freshTodayRecord = recordsRef.current.find((r) => r.date === todayStrLocal);
     if (!freshTodayRecord) return;
@@ -488,8 +419,6 @@ export default function Home() {
   };
 
   const handleClockOut = async () => {
-    cancelScheduleOut();
-    cancelScheduleBreak();
     const todayStrLocal = getTodayDateString();
     const freshTodayRecord = recordsRef.current.find((r) => r.date === todayStrLocal);
     if (!freshTodayRecord) return;
@@ -602,10 +531,11 @@ export default function Home() {
   };
 
   const saveRecordApi = async (record: DayRecord) => {
+    const updatedRecord = calculateRecordHours(record);
     if (user) {
       try {
-        const recordRef = ref(db, `records/${user.uid}/${record.date}`);
-        const sanitized = sanitizeForFirebase(record);
+        const recordRef = ref(db, `records/${user.uid}/${updatedRecord.date}`);
+        const sanitized = sanitizeForFirebase(updatedRecord);
         await set(recordRef, sanitized);
       } catch (error: any) {
         console.error('Error saving record to Firebase:', error);
@@ -616,7 +546,7 @@ export default function Home() {
         const res = await fetch('/api/records', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(record),
+          body: JSON.stringify(updatedRecord),
         });
         if (res.ok) {
           await fetchLocalData();
@@ -720,7 +650,8 @@ export default function Home() {
       }
     } else {
       // Pre-populate empty day
-      setModalStatus(new Date(dateStr).getDay() === 0 ? 'weekly-off' : 'present');
+      const isHoliday = holidays.some((h) => h.date === dateStr);
+      setModalStatus(isHoliday ? 'holiday' : (new Date(dateStr).getDay() === 0 ? 'weekly-off' : 'present'));
       setModalInTime('09:00');
       setModalOutTime('17:20');
       setModalRestTime(20);
@@ -964,6 +895,7 @@ export default function Home() {
 
     filteredRecords.forEach((record) => {
       const isToday = record.date === todayStr;
+      const isHoliday = holidays.some((h) => h.date === record.date);
       
       let worked = record.workedHours;
       if (isToday && record.status === 'present' && !record.outTime) {
@@ -972,13 +904,21 @@ export default function Home() {
 
       if (record.status === 'present') {
         presentDays++;
-        totalWorkDays++;
+        if (!isHoliday) {
+          totalWorkDays++;
+        }
         hoursWorkedTotal += worked;
       } else if (record.status === 'absent') {
         absentDays++;
-        totalWorkDays++;
+        if (!isHoliday) {
+          totalWorkDays++;
+        }
       } else if (record.status === 'weekly-off') {
         weeklyOffDays++;
+        if (worked > 0) {
+          hoursWorkedTotal += worked;
+        }
+      } else if (record.status === 'holiday') {
         if (worked > 0) {
           hoursWorkedTotal += worked;
         }
@@ -1221,52 +1161,7 @@ export default function Home() {
               )}
             </div>
 
-            {/* Scheduled Actions Status / Shortcuts */}
-            {todayRecord && todayRecord.status === 'present' && !todayRecord.outTime && (
-              <div className={styles.schedulerContainer}>
-                {/* Break Scheduler (only if not currently resting) */}
-                {!todayRecord.activeRestStart && (
-                  <div className={styles.schedulerSection}>
-                    {scheduledBreakTime ? (
-                      <div className={styles.activeSchedulerRow}>
-                        <span>
-                          <span className={styles.pulseDotWarning}></span>
-                          Auto-Break in <strong>{getCountdownSeconds(scheduledBreakTime)}s</strong>
-                        </span>
-                        <button className={styles.btnCancelMini} onClick={cancelScheduleBreak}>Cancel</button>
-                      </div>
-                    ) : (
-                      <div className={styles.shortcutRow}>
-                        <span className={styles.shortcutLabel}>Break in:</span>
-                        <button className={styles.btnShortcut} onClick={() => scheduleBreak(30)}>30s</button>
-                        <button className={styles.btnShortcut} onClick={() => scheduleBreak(60)}>60s</button>
-                        <button className={styles.btnShortcut} onClick={() => scheduleBreak(90)}>90s</button>
-                      </div>
-                    )}
-                  </div>
-                )}
 
-                {/* Leave Scheduler */}
-                <div className={styles.schedulerSection}>
-                  {scheduledOutTime ? (
-                    <div className={styles.activeSchedulerRow}>
-                      <span>
-                        <span className={styles.pulseDotDanger}></span>
-                        Auto-Leave in <strong>{getCountdownHMS(scheduledOutTime)}</strong>
-                      </span>
-                      <button className={styles.btnCancelMini} onClick={cancelScheduleOut}>Cancel</button>
-                    </div>
-                  ) : (
-                    <div className={styles.shortcutRow}>
-                      <span className={styles.shortcutLabel}>Leave in:</span>
-                      <button className={styles.btnShortcut} onClick={() => scheduleOut(5)}>5m</button>
-                      <button className={styles.btnShortcut} onClick={() => scheduleOut(10)}>10m</button>
-                      <button className={styles.btnShortcut} onClick={() => scheduleOut(15)}>15m</button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
 
             {/* Quick Stats Panel */}
             {todayRecord && todayRecord.status === 'present' && (
@@ -1399,7 +1294,9 @@ export default function Home() {
                 className={styles.statValue} 
                 style={{ color: displayStats.pendingHoursTotal >= 0 ? 'var(--color-absent)' : 'var(--color-present)' }}
               >
-                {formatHoursToText(Math.abs(displayStats.pendingHoursTotal))}
+                {displayStats.pendingHoursTotal >= 0 
+                  ? formatHoursToText(displayStats.pendingHoursTotal)
+                  : formatExtraHours(Math.abs(displayStats.pendingHoursTotal))}
               </div>
               <div className={styles.statSubtext}>
                 {displayStats.pendingHoursTotal >= 0 ? 'Hours remaining to meet quota' : 'Extra hours accumulated'}
@@ -1442,6 +1339,7 @@ export default function Home() {
                     const dateStr = getTodayDateString(day);
                     const isToday = dateStr === todayStr;
                     const record = records.find((r) => r.date === dateStr);
+                    const holiday = holidays.find((h) => h.date === dateStr);
                     const isSunday = day.getDay() === 0;
                     const isOutOfRange = (filterStartDate && dateStr < filterStartDate) || (filterEndDate && dateStr > filterEndDate);
                     const isFuture = dateStr > todayStr;
@@ -1449,6 +1347,11 @@ export default function Home() {
                     let statusClass = '';
                     let label = '';
                     let restLabel = '';
+                    let holidayLabel = '';
+
+                    if (holiday) {
+                      holidayLabel = `🎉 ${holiday.name}`;
+                    }
 
                     if (record) {
                       if (record.status === 'present') {
@@ -1463,7 +1366,13 @@ export default function Home() {
                       } else if (record.status === 'weekly-off') {
                         statusClass = styles.dayWeeklyOff;
                         label = 'Weekly Off';
+                      } else if (record.status === 'holiday') {
+                        statusClass = styles.dayWeeklyOff;
+                        label = 'Holiday';
                       }
+                    } else if (holiday) {
+                      statusClass = styles.dayWeeklyOff;
+                      label = 'Holiday';
                     } else if (isSunday) {
                       statusClass = styles.dayWeeklyOff;
                       label = 'Weekly Off';
@@ -1487,6 +1396,8 @@ export default function Home() {
                                 ? styles.dayHoursLabel 
                                 : record?.status === 'absent'
                                 ? styles.dayStatusPill + ' ' + styles.dayPillAbsent
+                                : record?.status === 'holiday' || (!record && holiday)
+                                ? styles.dayStatusPill + ' ' + styles.dayPillHoliday
                                 : styles.dayStatusPill + ' ' + styles.dayPillWeeklyOff
                             }
                           >
@@ -1494,6 +1405,7 @@ export default function Home() {
                           </div>
                         )}
                         {restLabel && <div className={styles.dayRestLabel}>{restLabel}</div>}
+                        {holidayLabel && <div className={styles.dayHolidayLabel}>{holidayLabel}</div>}
                       </div>
                     );
                   })}
@@ -1607,6 +1519,7 @@ export default function Home() {
                   <option value="present">Present</option>
                   <option value="absent">Absent</option>
                   <option value="weekly-off">Weekly Off (Sunday)</option>
+                  <option value="holiday">Public Holiday</option>
                 </select>
               </div>
 

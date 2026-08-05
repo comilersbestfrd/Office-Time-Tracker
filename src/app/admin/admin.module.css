@@ -332,6 +332,11 @@
   color: #60a5fa;
 }
 
+.badgeHoliday {
+  background: rgba(167, 139, 250, 0.1);
+  color: #a78bfa;
+}
+
 /* ---------- Buttons ---------- */
 .btnPrimary {
   padding: 0.65rem 1.4rem;

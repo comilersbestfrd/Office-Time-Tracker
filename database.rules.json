@@ -1,5 +1,9 @@
 {
   "rules": {
+    "holidays": {
+      ".read": "auth != null",
+      ".write": "auth != null && auth.token.email == 'woxxinsolution12@gmail.com'"
+    },
     "records": {
       ".read": "auth != null && auth.token.email == 'woxxinsolution12@gmail.com'",
       ".write": "auth != null && auth.token.email == 'woxxinsolution12@gmail.com'",

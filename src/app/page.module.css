@@ -458,6 +458,17 @@
   color: var(--text-secondary);
 }
 
+.dayHolidayLabel {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #a78bfa;
+}
+
+.dayPillHoliday {
+  background: rgba(167, 139, 250, 0.15);
+  color: #a78bfa;
+}
+
 .dayCellEmpty {
   opacity: 0.25;
   cursor: default;
