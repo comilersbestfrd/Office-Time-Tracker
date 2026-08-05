@@ -346,14 +346,17 @@ export default function Home() {
     return `${h}h ${m}m`;
   };
 
-  const formatExtraHours = (hours: number): string => {
-    const totalMins = Math.round(hours * 60);
-    if (totalMins < 60) {
-      return `${totalMins}m`;
+  const formatExtraHoursSign = (hours: number): string => {
+    const isNegative = hours < 0;
+    const absMins = Math.round(Math.abs(hours) * 60);
+    const sign = isNegative ? '-' : '+';
+    if (absMins < 60) {
+      return `${sign}${absMins}m`;
     }
-    const h = Math.floor(totalMins / 60);
-    const m = totalMins % 60;
-    return `${h}h ${m}m`;
+    const h = Math.floor(absMins / 60);
+    const m = absMins % 60;
+    if (m === 0) return `${sign}${h}h`;
+    return `${sign}${h}h ${m}m`;
   };
 
   // Formatter: ISO DateTime to local string (HH:MM AM/PM)
@@ -1294,9 +1297,7 @@ export default function Home() {
                 className={styles.statValue} 
                 style={{ color: displayStats.pendingHoursTotal >= 0 ? 'var(--color-absent)' : 'var(--color-present)' }}
               >
-                {displayStats.pendingHoursTotal >= 0 
-                  ? formatHoursToText(displayStats.pendingHoursTotal)
-                  : formatExtraHours(Math.abs(displayStats.pendingHoursTotal))}
+                {formatExtraHoursSign(displayStats.hoursWorkedTotal - displayStats.requiredHoursTotal)}
               </div>
               <div className={styles.statSubtext}>
                 {displayStats.pendingHoursTotal >= 0 ? 'Hours remaining to meet quota' : 'Extra hours accumulated'}
