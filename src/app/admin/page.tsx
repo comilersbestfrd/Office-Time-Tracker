@@ -42,6 +42,17 @@ const formatTime = (iso: string | null) => {
   }
 };
 
+const formatHoursToHHMM = (hours: number | null | undefined): string => {
+  if (hours == null) return '--';
+  const isNegative = hours < 0;
+  const absHours = Math.abs(hours);
+  const h = Math.floor(absHours);
+  const m = Math.round((absHours - h) * 60);
+  const sign = isNegative ? '-' : '';
+  const mmStr = String(m).padStart(2, '0');
+  return `${sign}${h}:${mmStr}`;
+};
+
 export default function AdminDashboard() {
   const { isAdminUser, loading: adminLoading } = useAdminGuard();
   const router = useRouter();
@@ -328,7 +339,7 @@ export default function AdminDashboard() {
           <span className={styles.statLabel}>Absent Days</span>
         </div>
         <div className={styles.statCard}>
-          <span className={styles.statNumber}>{totalStats.totalHoursWorked.toFixed(1)}h</span>
+          <span className={styles.statNumber}>{formatHoursToHHMM(totalStats.totalHoursWorked)}</span>
           <span className={styles.statLabel}>Hours Worked</span>
         </div>
       </div>
@@ -482,8 +493,8 @@ export default function AdminDashboard() {
                       <th>Out Time</th>
                       <th>Rest (min)</th>
                       <th>Lunch (min)</th>
-                      <th>Worked (hrs)</th>
-                      <th>Pending (hrs)</th>
+                      <th>Worked (hh:mm)</th>
+                      <th>Pending (hh:mm)</th>
                       <th>Notes</th>
                       <th>Actions</th>
                     </tr>
@@ -509,9 +520,9 @@ export default function AdminDashboard() {
                         <td>{rec.restTimeTotal ? Math.round(rec.restTimeTotal) : 0}</td>
                         <td>{rec.lunchDeduction ? Math.round(rec.lunchDeduction) : '--'}</td>
                         <td className={styles.hoursCell}>
-                          {rec.workedHours != null ? rec.workedHours.toFixed(2) : '--'}
+                          {formatHoursToHHMM(rec.workedHours)}
                         </td>
-                        <td>{rec.pendingHours != null ? rec.pendingHours.toFixed(2) : '--'}</td>
+                        <td>{formatHoursToHHMM(rec.pendingHours)}</td>
                         <td className={styles.notesCell}>{rec.notes || '--'}</td>
                         <td>
                           <button
