@@ -50,8 +50,23 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string): DayRec
     };
   }
 
+  const todayStr = nowStr ? nowStr.substring(0, 10) : new Date().toISOString().substring(0, 10);
+  const isToday = record.date === todayStr;
+
   const inTime = new Date(record.inTime);
-  const outTime = record.outTime ? new Date(record.outTime) : new Date(nowStr || new Date().toISOString());
+  let outTime: Date;
+  let outTimeStr = record.outTime;
+
+  if (record.outTime) {
+    outTime = new Date(record.outTime);
+  } else if (isToday) {
+    outTime = new Date(nowStr || new Date().toISOString());
+  } else {
+    // Past day and user forgot to clock out - default to 6:10 PM (18:10)
+    const defaultOut = new Date(`${record.date}T18:10:00`);
+    outTime = defaultOut;
+    outTimeStr = defaultOut.toISOString();
+  }
 
   // Total elapsed time in milliseconds
   const elapsedMs = outTime.getTime() - inTime.getTime();
@@ -99,6 +114,7 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string): DayRec
 
   return {
     ...record,
+    outTime: outTimeStr,
     lunchDeduction: parseFloat(lunchDeductionMinutes.toFixed(2)),
     workedHours: parseFloat(workedHours.toFixed(2)),
     pendingHours: parseFloat(pendingHours.toFixed(2)),
