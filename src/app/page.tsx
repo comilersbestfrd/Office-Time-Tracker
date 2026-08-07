@@ -49,9 +49,12 @@ export default function Home() {
   const [usernameInput, setUsernameInput] = useState<string>('');
   const [usernameSaving, setUsernameSaving] = useState<boolean>(false);
 
-  // UI/Modal States
-  const [currentMonth, setCurrentMonth] = useState<Date>(new Date());
-  const [showModal, setShowModal] = useState<boolean>(false);
+  // UI/Modal States (extended)
+  const [showManualBreakModal, setShowManualBreakModal] = useState<boolean>(false);
+  const [manualBreakStart, setManualBreakStart] = useState<string>('');
+  const [manualBreakEnd, setManualBreakEnd] = useState<string>('');
+  const [showManualStartModal, setShowManualStartModal] = useState<boolean>(false);
+  const [manualInPunch, setManualInPunch] = useState<string>('');
   const [modalDate, setModalDate] = useState<string>('');
   const [modalStatus, setModalStatus] = useState<'present' | 'absent' | 'weekly-off' | 'holiday'>('present');
   const [modalInTime, setModalInTime] = useState<string>('09:00');
@@ -62,10 +65,20 @@ export default function Home() {
   const [newBreakEnd, setNewBreakEnd] = useState<string>('');
   const [modalNotes, setModalNotes] = useState<string>('');
 
+  // Forgotten clock-out / "Still Working?" popup states
+  const [forgottenRecord, setForgottenRecord] = useState<DayRecord | null>(null);
+  const [confirmTimeInput, setConfirmTimeInput] = useState<string>('18:15');
+  const [showStillWorkingModal, setShowStillWorkingModal] = useState<boolean>(false);
+
+  // Manual entry modal state
+  const [showModal, setShowModal] = useState<boolean>(false);
+
   // Tab & Date Filter States
   const [activeTab, setActiveTab] = useState<'today' | 'stats'>('today');
   const [filterStartDate, setFilterStartDate] = useState<string>('');
   const [filterEndDate, setFilterEndDate] = useState<string>('');
+  // Current month state for calendar navigation
+  const [currentMonth, setCurrentMonth] = useState(new Date());
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -194,6 +207,18 @@ export default function Home() {
     };
   }, [user]);
 
+  // Listen for any forgotten clock-outs
+  useEffect(() => {
+    // Find the first past record that has been auto-clocked out
+    const found = records.find(r => r.status === 'present' && r.isAutoClockedOut);
+    if (found) {
+      setForgottenRecord(found);
+      setConfirmTimeInput('18:15');
+    } else {
+      setForgottenRecord(null);
+    }
+  }, [records]);
+
   useEffect(() => {
     setCurrentDateTime(new Date());
 
@@ -206,6 +231,23 @@ export default function Home() {
     const clockInterval = setInterval(() => {
       const now = new Date();
       setCurrentDateTime(now);
+
+      // Still working late prompt check (it is past 6:15 PM / 18:15)
+      const todayStrLocal = getTodayDateString(now);
+      const todayRec = recordsRef.current.find(r => r.date === todayStrLocal);
+      
+      if (
+        todayRec && 
+        todayRec.status === 'present' && 
+        !todayRec.outTime && 
+        (now.getHours() > 18 || (now.getHours() === 18 && now.getMinutes() >= 15))
+      ) {
+        // Show prompt if we haven't prompted today
+        const lastPromptDate = localStorage.getItem('lastWorkingLatePromptDate');
+        if (lastPromptDate !== todayStrLocal) {
+          setShowStillWorkingModal(true);
+        }
+      }
     }, 1000);
 
     // Global keyboard shortcut handler for 'R' to toggle break
@@ -367,13 +409,24 @@ export default function Home() {
 
 
 
+  // Helper: Check if two time ranges overlap
+  const isOverlapping = (aStart: number, aEnd: number, bStart: number, bEnd: number): boolean => {
+    return aStart < bEnd && aEnd > bStart;
+  };
+
   // Clock Actions
   const handleClockIn = async () => {
+    const now = new Date();
+    // Enforce minimum In time: 8:00 AM
+    if (now.getHours() < 8) {
+      alert('Clock-in is not allowed before 8:00 AM!');
+      return;
+    }
     const dateStr = getTodayDateString();
     const newRecord: DayRecord = {
       date: dateStr,
       status: 'present',
-      inTime: new Date().toISOString(),
+      inTime: now.toISOString(),
       outTime: null,
       restSessions: [],
       restTimeTotal: 0,
@@ -446,6 +499,121 @@ export default function Home() {
 
     updatedRecord.outTime = new Date().toISOString();
     await saveRecordApi(updatedRecord);
+  };
+
+  // Manual Break Handler - adds a break session to today's record
+  const handleSaveManualBreak = async () => {
+    if (!manualBreakStart || !manualBreakEnd) {
+      alert('Please specify both start and end times for the break!');
+      return;
+    }
+    const todayStrLocal = getTodayDateString();
+    const freshTodayRecord = recordsRef.current.find((r) => r.date === todayStrLocal);
+    if (!freshTodayRecord || freshTodayRecord.status !== 'present') {
+      alert('You need an active (present) record for today to add a break!');
+      return;
+    }
+
+    const localStartStr = `${todayStrLocal}T${manualBreakStart}:00`;
+    const localEndStr = `${todayStrLocal}T${manualBreakEnd}:00`;
+    const startDate = new Date(localStartStr);
+    const endDate = new Date(localEndStr);
+
+    if (endDate.getTime() <= startDate.getTime()) {
+      alert('Break end time must be after the start time!');
+      return;
+    }
+
+    // Validate: break must be within In-Time and Out-Time (or current time)
+    if (freshTodayRecord.inTime) {
+      const inTime = new Date(freshTodayRecord.inTime).getTime();
+      if (startDate.getTime() < inTime) {
+        alert('Break start time cannot be before your In-Punch time!');
+        return;
+      }
+    }
+    const outBound = freshTodayRecord.outTime
+      ? new Date(freshTodayRecord.outTime).getTime()
+      : new Date().getTime();
+    if (endDate.getTime() > outBound) {
+      alert('Break end time cannot be after your Out-Punch time (or current time if still working)!');
+      return;
+    }
+
+    // Validate: no overlapping breaks
+    const existingSessions = freshTodayRecord.restSessions || [];
+    const hasOverlap = existingSessions.some((s) => {
+      if (!s.end) return false;
+      return isOverlapping(
+        startDate.getTime(), endDate.getTime(),
+        new Date(s.start).getTime(), new Date(s.end).getTime()
+      );
+    });
+    if (hasOverlap) {
+      alert('This break overlaps with an existing break! Please choose a different time range.');
+      return;
+    }
+
+    const newSession: RecordSession = {
+      start: startDate.toISOString(),
+      end: endDate.toISOString(),
+    };
+
+    const updatedSessions = [...existingSessions, newSession];
+    let totalMins = 0;
+    updatedSessions.forEach((s) => {
+      if (s.end) {
+        totalMins += (new Date(s.end).getTime() - new Date(s.start).getTime()) / 60000;
+      }
+    });
+
+    const updatedRecord: DayRecord = {
+      ...freshTodayRecord,
+      restSessions: updatedSessions,
+      restTimeTotal: Math.round(totalMins),
+    };
+
+    await saveRecordApi(updatedRecord);
+    setManualBreakStart('');
+    setManualBreakEnd('');
+    setShowManualBreakModal(false);
+  };
+
+  // Manual Start Tracker Handler - creates a present record with a custom in-time
+  const handleManualStart = async () => {
+    if (!manualInPunch) {
+      alert('Please specify an In-Punch time!');
+      return;
+    }
+    const todayStrLocal = getTodayDateString();
+    const inDate = new Date(`${todayStrLocal}T${manualInPunch}:00`);
+
+    if (inDate.getTime() > new Date().getTime()) {
+      alert('In-Punch time cannot be in the future!');
+      return;
+    }
+
+    // Enforce minimum In time: 8:00 AM
+    if (inDate.getHours() < 8) {
+      alert('In-Punch time cannot be before 8:00 AM!');
+      return;
+    }
+
+    const newRecord: DayRecord = {
+      date: todayStrLocal,
+      status: 'present',
+      inTime: inDate.toISOString(),
+      outTime: null,
+      restSessions: [],
+      restTimeTotal: 0,
+      activeRestStart: null,
+      workedHours: 0,
+      pendingHours: 8,
+    };
+
+    await saveRecordApi(newRecord);
+    setManualInPunch('');
+    setShowManualStartModal(false);
   };
 
   const handleMarkAbsentToday = async () => {
@@ -688,6 +856,35 @@ export default function Home() {
       return;
     }
 
+    // Validate: break must be within In-Time and Out-Time
+    if (modalInTime) {
+      const inBound = new Date(`${modalDate}T${modalInTime}:00`).getTime();
+      if (startDate.getTime() < inBound) {
+        alert('Break start time cannot be before the In-Time!');
+        return;
+      }
+    }
+    if (modalOutTime) {
+      const outBound = new Date(`${modalDate}T${modalOutTime}:00`).getTime();
+      if (endDate.getTime() > outBound) {
+        alert('Break end time cannot be after the Out-Time!');
+        return;
+      }
+    }
+
+    // Validate: no overlapping breaks
+    const hasOverlap = modalRestSessions.some((s) => {
+      if (!s.end) return false;
+      return isOverlapping(
+        startDate.getTime(), endDate.getTime(),
+        new Date(s.start).getTime(), new Date(s.end).getTime()
+      );
+    });
+    if (hasOverlap) {
+      alert('This break overlaps with an existing break! Please choose a different time range.');
+      return;
+    }
+
     const newSession: RecordSession = {
       start: startDate.toISOString(),
       end: endDate.toISOString(),
@@ -758,6 +955,12 @@ export default function Home() {
         return;
       }
 
+      // Enforce minimum In time: 8:00 AM
+      if (inDate.getHours() < 8) {
+        alert('In-Time cannot be before 8:00 AM!');
+        return;
+      }
+
       record.inTime = inDate.toISOString();
 
       if (modalOutTime) {
@@ -767,6 +970,12 @@ export default function Home() {
         // Handle overnight shift if Out Time is smaller than In Time
         if (outDate.getTime() < inDate.getTime()) {
           outDate.setDate(outDate.getDate() + 1);
+        }
+
+        // Enforce maximum Out time: 8:00 PM (20:00)
+        if (outDate.getHours() >= 20 && outDate.getMinutes() > 0 || outDate.getHours() > 20) {
+          alert('Out-Time cannot be after 8:00 PM!');
+          return;
         }
 
         record.outTime = outDate.toISOString();
@@ -1070,6 +1279,7 @@ export default function Home() {
       {activeTab === 'today' ? (
         /* Main Column Layout for Today */
         <main className={`${styles.singleColumnLayout} animate-fade-in`}>
+
           {/* Console Controls */}
           <section className={`${styles.clockConsole} ${styles.centeredConsole}`}>
             <div className={`${styles.glass} ${clockCardClass}`}>
@@ -1164,6 +1374,29 @@ export default function Home() {
               )}
             </div>
 
+            {/* Quick Action Buttons */}
+            <div className={styles.clockButtons} style={{ marginTop: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '0.75rem' }}>
+              {todayRecord && todayRecord.status === 'present' && !todayRecord.outTime && (
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnSecondary}`}
+                  onClick={() => setShowManualBreakModal(true)}
+                  style={{ fontSize: '0.85rem' }}
+                >
+                  ☕ Add Manual Break
+                </button>
+              )}
+              {(!todayRecord || todayRecord.status !== 'present') && (
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnPrimary}`}
+                  onClick={() => setShowManualStartModal(true)}
+                  style={{ fontSize: '0.85rem' }}
+                >
+                  ▶️ Start Tracker Manually
+                </button>
+              )}
+            </div>
 
 
             {/* Quick Stats Panel */}
@@ -1691,6 +1924,219 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* Still Working Modal */}
+      {showStillWorkingModal && (
+        <div className={styles.modalOverlay}>
+          <div className={`${styles.glass} ${styles.modalContent}`} style={{ maxWidth: '400px', textAlign: 'center' }}>
+            <h3 style={{ fontSize: '1.25rem', fontWeight: 600, color: '#fff', marginBottom: '0.5rem' }}>⏰ Are you still working?</h3>
+            <p style={{ margin: '1.25rem 0', fontSize: '0.95rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
+              It is past 6:15 PM. Click <strong>Yes</strong> if you are still working late. Otherwise, click <strong>No</strong> to clock out now.
+            </p>
+            <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', marginTop: '1.5rem' }}>
+              <button 
+                type="button"
+                className={`${styles.btn} ${styles.btnPrimary}`} 
+                onClick={() => {
+                  const todayStrLocal = getTodayDateString();
+                  localStorage.setItem('lastWorkingLatePromptDate', todayStrLocal);
+                  setShowStillWorkingModal(false);
+                }}
+              >
+                Yes, still working
+              </button>
+              <button 
+                type="button"
+                className={`${styles.btn} ${styles.btnDanger}`} 
+                onClick={async () => {
+                  setShowStillWorkingModal(false);
+                  await handleClockOut();
+                }}
+              >
+                No, clock out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Forgotten Clock-Out Confirmation Modal */}
+      {forgottenRecord && (
+        <div className={styles.modalOverlay}>
+          <div className={`${styles.glass} ${styles.modalContent}`} style={{ maxWidth: '450px' }}>
+            <div className={styles.modalHeader}>
+              <h3>⚠️ Forgotten Clock-Out</h3>
+            </div>
+            <div style={{ padding: '1.25rem 0 0 0' }}>
+              <p style={{ margin: '0 0 1.25rem 0', fontSize: '0.95rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
+                You forgot to clock out on <strong>{forgottenRecord.date}</strong>.<br />
+                We have set your clock-out time to <strong>6:15 PM</strong> by default. Is this correct?
+              </p>
+              
+              <div className={styles.formGroup} style={{ marginBottom: '1.5rem' }}>
+                <label className={styles.formLabel}>Clock-Out Time</label>
+                <input 
+                  type="time" 
+                  className={styles.formInput} 
+                  value={confirmTimeInput}
+                  onChange={(e) => setConfirmTimeInput(e.target.value)}
+                  style={{ 
+                    width: '100%', 
+                    padding: '0.50rem', 
+                    background: 'rgba(255,255,255,0.05)', 
+                    border: '1px solid rgba(255,255,255,0.1)', 
+                    color: '#fff', 
+                    borderRadius: '6px' 
+                  }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end', marginTop: '1.5rem' }}>
+                <button 
+                  type="button"
+                  className={`${styles.btn} ${styles.btnSecondary}`}
+                  onClick={async () => {
+                    // Save custom time
+                    const [hh, mm] = confirmTimeInput.split(':');
+                    const customOutDate = new Date(`${forgottenRecord.date}T${hh}:${mm}:00`);
+                    const updated: DayRecord = {
+                      ...forgottenRecord,
+                      outTime: customOutDate.toISOString(),
+                      isAutoClockedOut: false
+                    };
+                    await saveRecordApi(updated);
+                    setForgottenRecord(null);
+                  }}
+                >
+                  Save Custom Time
+                </button>
+                <button 
+                  type="button"
+                  className={`${styles.btn} ${styles.btnPrimary}`}
+                  onClick={async () => {
+                    // Confirm default 6:15 PM
+                    const defaultOutDate = new Date(`${forgottenRecord.date}T18:15:00`);
+                    const updated: DayRecord = {
+                      ...forgottenRecord,
+                      outTime: defaultOutDate.toISOString(),
+                      isAutoClockedOut: false
+                    };
+                    await saveRecordApi(updated);
+                    setForgottenRecord(null);
+                  }}
+                >
+                  Yes, 6:15 PM is correct
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manual Break Modal */}
+      {showManualBreakModal && (
+        <div className={styles.modalOverlay} onClick={() => setShowManualBreakModal(false)}>
+          <div className={`${styles.glass} ${styles.modalContent}`} style={{ maxWidth: '420px' }} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.modalHeader}>
+              <h3>☕ Add Manual Break</h3>
+              <button className={styles.modalCloseBtn} onClick={() => setShowManualBreakModal(false)}>✕</button>
+            </div>
+            <div style={{ padding: '1.5rem' }}>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: '1.25rem', fontSize: '0.9rem', lineHeight: '1.4' }}>
+                Add a break session to today&apos;s record. Specify the start and end times of your break.
+              </p>
+              <div className={styles.formGroup}>
+                <label className={styles.formLabel}>Break Start Time</label>
+                <input
+                  type="time"
+                  className={styles.formInput}
+                  value={manualBreakStart}
+                  onChange={(e) => setManualBreakStart(e.target.value)}
+                />
+              </div>
+              <div className={styles.formGroup}>
+                <label className={styles.formLabel}>Break End Time</label>
+                <input
+                  type="time"
+                  className={styles.formInput}
+                  value={manualBreakEnd}
+                  onChange={(e) => setManualBreakEnd(e.target.value)}
+                />
+              </div>
+              {manualBreakStart && manualBreakEnd && (() => {
+                const s = new Date(`2000-01-01T${manualBreakStart}:00`);
+                const e = new Date(`2000-01-01T${manualBreakEnd}:00`);
+                const diff = Math.round((e.getTime() - s.getTime()) / 60000);
+                if (diff > 0) return (
+                  <div style={{ padding: '0.75rem', background: 'rgba(99,102,241,0.1)', borderRadius: '8px', marginBottom: '1rem', textAlign: 'center' }}>
+                    <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.95rem' }}>Duration: {diff} minutes</span>
+                  </div>
+                );
+                return null;
+              })()}
+              <div className={styles.modalFooter}>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnSecondary}`}
+                  onClick={() => { setManualBreakStart(''); setManualBreakEnd(''); setShowManualBreakModal(false); }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnPrimary}`}
+                  onClick={handleSaveManualBreak}
+                >
+                  Save Break
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manual Start Tracker Modal */}
+      {showManualStartModal && (
+        <div className={styles.modalOverlay} onClick={() => setShowManualStartModal(false)}>
+          <div className={`${styles.glass} ${styles.modalContent}`} style={{ maxWidth: '420px' }} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.modalHeader}>
+              <h3>▶️ Start Tracker Manually</h3>
+              <button className={styles.modalCloseBtn} onClick={() => setShowManualStartModal(false)}>✕</button>
+            </div>
+            <div style={{ padding: '1.5rem' }}>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: '1.25rem', fontSize: '0.9rem', lineHeight: '1.4' }}>
+                Enter your actual In-Punch time to start tracking. This is useful if you forgot to clock in on time.
+              </p>
+              <div className={styles.formGroup}>
+                <label className={styles.formLabel}>In-Punch Time</label>
+                <input
+                  type="time"
+                  className={styles.formInput}
+                  value={manualInPunch}
+                  onChange={(e) => setManualInPunch(e.target.value)}
+                />
+              </div>
+              <div className={styles.modalFooter}>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnSecondary}`}
+                  onClick={() => { setManualInPunch(''); setShowManualStartModal(false); }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnPrimary}`}
+                  onClick={handleManualStart}
+                >
+                  Start Tracking
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
         </>
       )}
     </div>

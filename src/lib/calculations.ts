@@ -15,6 +15,7 @@ export interface DayRecord {
   pendingHours: number; // calculated pending hours
   lunchDeduction?: number; // in minutes
   notes?: string;
+  isAutoClockedOut?: boolean;
 }
 
 export interface Holiday {
@@ -56,16 +57,18 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string): DayRec
   const inTime = new Date(record.inTime);
   let outTime: Date;
   let outTimeStr = record.outTime;
+  let isAutoClockedOut = false;
 
   if (record.outTime) {
     outTime = new Date(record.outTime);
   } else if (isToday) {
     outTime = new Date(nowStr || new Date().toISOString());
   } else {
-    // Past day and user forgot to clock out - default to 6:10 PM (18:10)
-    const defaultOut = new Date(`${record.date}T18:10:00`);
+    // Past day and user forgot to clock out - default to 6:15 PM (18:15)
+    const defaultOut = new Date(`${record.date}T18:15:00`);
     outTime = defaultOut;
     outTimeStr = defaultOut.toISOString();
+    isAutoClockedOut = true;
   }
 
   // Total elapsed time in milliseconds
@@ -115,6 +118,7 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string): DayRec
   return {
     ...record,
     outTime: outTimeStr,
+    isAutoClockedOut,
     lunchDeduction: parseFloat(lunchDeductionMinutes.toFixed(2)),
     workedHours: parseFloat(workedHours.toFixed(2)),
     pendingHours: parseFloat(pendingHours.toFixed(2)),
