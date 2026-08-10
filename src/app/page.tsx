@@ -8,10 +8,39 @@ import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/aut
 import { ref, onValue, set, get } from 'firebase/database';
 import { RecordSession, DayRecord, DashboardStats, calculateRecordHours, Holiday } from '@/lib/calculations';
 
+import AdsterraAd from './components/AdsterraAd';
+import AdsterraNative from './components/AdsterraNative';
+
 const ADMIN_EMAIL = 'woxxinsolution12@gmail.com';
 
 export default function Home() {
   const router = useRouter();
+
+  // App Simulation States
+  const [activeAppModal, setActiveAppModal] = useState<'dialer' | 'message' | 'browser' | 'camera' | null>(null);
+
+  // Dialer State
+  const [dialNumber, setDialNumber] = useState<string>('');
+  const [isCalling, setIsCalling] = useState<boolean>(false);
+  const [callDuration, setCallDuration] = useState<number>(0);
+  const callingTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Message App State
+  const [chatInputText, setChatInputText] = useState<string>('');
+  const [chatMessages, setChatMessages] = useState<Array<{ sender: 'bot' | 'user'; text: string }>>([
+    { sender: 'bot', text: '👋 Hello! I am your Office Helper Bot. How can I help you today? You can ask me about "stats", "break", or "work".' }
+  ]);
+
+  // Browser App State
+  const [browserSearchQuery, setBrowserSearchQuery] = useState<string>('');
+  const [currentBrowserPage, setCurrentBrowserPage] = useState<'google' | 'search'>('google');
+
+  // Camera App State
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [cameraFilter, setCameraFilter] = useState<string>('none');
+  const [showShutterFlash, setShowShutterFlash] = useState<boolean>(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+
   // Data States
   const [records, setRecords] = useState<DayRecord[]>([]);
   const recordsRef = useRef<DayRecord[]>([]);
@@ -278,12 +307,162 @@ export default function Home() {
 
     window.addEventListener('keydown', handleKeyDown);
 
+  }, []);
+
+  // SocialBar Script Effect
+  useEffect(() => {
+    // Inject SocialBar overlay script safely
+    const socialBarScript = document.createElement('script');
+    socialBarScript.src = 'https://pl30780812.effectivecpmnetwork.com/4a/06/b0/4a06b011b3a6976348b4f34ff393dfb0.js';
+    socialBarScript.async = true;
+    document.body.appendChild(socialBarScript);
+
     return () => {
-      clearInterval(clockInterval);
-      window.removeEventListener('keydown', handleKeyDown);
-      if (timerRef.current) clearInterval(timerRef.current);
+      if (document.body.contains(socialBarScript)) {
+        document.body.removeChild(socialBarScript);
+      }
     };
   }, []);
+
+  // Dialer Call Timer Effect
+  useEffect(() => {
+    if (isCalling) {
+      setCallDuration(0);
+      callingTimerRef.current = setInterval(() => {
+        setCallDuration((prev) => prev + 1);
+      }, 1000);
+    } else {
+      if (callingTimerRef.current) {
+        clearInterval(callingTimerRef.current);
+        callingTimerRef.current = null;
+      }
+    }
+    return () => {
+      if (callingTimerRef.current) {
+        clearInterval(callingTimerRef.current);
+      }
+    };
+  }, [isCalling]);
+
+  // Camera Track Cleanup Effect
+  useEffect(() => {
+    return () => {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, [cameraStream]);
+
+  // App Simulation Actions
+  const handleOpenCamera = async () => {
+    setActiveAppModal('camera');
+    setCameraFilter('none');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      setCameraStream(stream);
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      }, 150);
+    } catch (err) {
+      console.warn("Camera access denied or unavailable:", err);
+    }
+  };
+
+  const handleCloseCamera = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((track) => track.stop());
+      setCameraStream(null);
+    }
+    setActiveAppModal(null);
+  };
+
+  const handleSendMessage = () => {
+    if (!chatInputText.trim()) return;
+    const userMsg = { sender: 'user' as const, text: chatInputText };
+    setChatMessages((prev) => [...prev, userMsg]);
+    setChatInputText('');
+
+    setTimeout(() => {
+      const query = chatInputText.toLowerCase();
+      let replyText = '';
+
+      if (query.includes('stat') || query.includes('worked') || query.includes('hour')) {
+        const workedStr = todayRecord ? formatHoursToText(todayRecord.workedHours) : '0h 00m';
+        const pendingStr = todayRecord ? formatHoursToText(todayRecord.pendingHours) : '8h 00m';
+        replyText = `📊 Today's Stats: You have worked ${workedStr} so far. Pending hours: ${pendingStr}. Keep grinding! 🚀`;
+      } else if (query.includes('break') || query.includes('rest') || query.includes('lunch')) {
+        const breakMins = todayRecord ? Math.round(todayRecord.restTimeTotal) : 0;
+        replyText = `☕ Break Stats: You have logged ${breakMins} minutes of rest breaks today. The allowed paid limit is 20 minutes.`;
+      } else if (query.includes('hello') || query.includes('hi') || query.includes('hey')) {
+        replyText = `👋 Hello! I am here to assist you with tracking your office hours. Type "stats" to view your hours or "break" to see break time!`;
+      } else {
+        const responses = [
+          "Focus is the key! 🎯 Remember to drink some water.",
+          "Keep up the great work! You're doing awesome. 👍",
+          "Need a screen break? Look away 20 feet for 20 seconds to protect your eyes. 👀",
+          "Working hard! Let me know if you need help summarizing your day's work logs.",
+          "Did you know? Exceeding 20 minutes of break time automatically deducts from your actual worked hours. Stay mindful! ⏱️"
+        ];
+        replyText = responses[Math.floor(Math.random() * responses.length)];
+      }
+
+      setChatMessages((prev) => [...prev, { sender: 'bot', text: replyText }]);
+    }, 600);
+  };
+
+  const formatCallTime = (secs: number) => {
+    const mm = String(Math.floor(secs / 60)).padStart(2, '0');
+    const ss = String(secs % 60).padStart(2, '0');
+    return `${mm}:${ss}`;
+  };
+
+  const appShortcuts = [
+    {
+      id: 'dialer',
+      name: 'Default Dialer',
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+        </svg>
+      ),
+      action: () => { setActiveAppModal('dialer'); setIsCalling(false); setDialNumber(''); }
+    },
+    {
+      id: 'message',
+      name: 'Our Message App',
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      ),
+      action: () => setActiveAppModal('message')
+    },
+    {
+      id: 'browser',
+      name: 'Default Browser',
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <line x1="2" y1="12" x2="22" y2="12" />
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+        </svg>
+      ),
+      action: () => { setActiveAppModal('browser'); setCurrentBrowserPage('google'); setBrowserSearchQuery(''); }
+    },
+    {
+      id: 'camera',
+      name: 'Camera',
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+          <circle cx="12" cy="13" r="4" />
+        </svg>
+      ),
+      action: () => handleOpenCamera()
+    }
+  ];
 
   const setPresetRange = (preset: 'this-month' | 'last-30' | 'all') => {
     const today = new Date();
@@ -1251,38 +1430,38 @@ export default function Home() {
       ) : (
         <>
           {/* Navigation Tabs */}
-      <div className={`${styles.tabNav} animate-fade-in`}>
-        <button 
-          className={`${styles.tabBtn} ${activeTab === 'today' ? styles.tabBtnActive : ''}`}
-          onClick={() => setActiveTab('today')}
-        >
-          ⏱️ Today&apos;s Console
-        </button>
-        <button 
-          className={`${styles.tabBtn} ${activeTab === 'stats' ? styles.tabBtnActive : ''}`}
-          onClick={() => setActiveTab('stats')}
-        >
-          📊 Stats & Historical Logs
-        </button>
-      </div>
-      {/* Admin Dashboard navigation */}
-      {user?.email === ADMIN_EMAIL && (
-        <button
-          className={`${styles.btn} ${styles.btnSecondary}`}
-          onClick={() => router.push('/admin')}
-          style={{ marginLeft: '0.5rem' }}
-        >
-          🛡️ Admin Dashboard
-        </button>
-      )}
+          <div className={`${styles.tabNav} animate-fade-in`}>
+            <button 
+              className={`${styles.tabBtn} ${activeTab === 'today' ? styles.tabBtnActive : ''}`}
+              onClick={() => setActiveTab('today')}
+            >
+              ⏱️ Today&apos;s Console
+            </button>
+            <button 
+              className={`${styles.tabBtn} ${activeTab === 'stats' ? styles.tabBtnActive : ''}`}
+              onClick={() => setActiveTab('stats')}
+            >
+              📊 Stats & Historical Logs
+            </button>
+          </div>
+          {/* Admin Dashboard navigation */}
+          {user?.email === ADMIN_EMAIL && (
+            <button
+              className={`${styles.btn} ${styles.btnSecondary}`}
+              onClick={() => router.push('/admin')}
+              style={{ marginLeft: '0.5rem' }}
+            >
+              🛡️ Admin Dashboard
+            </button>
+          )}
 
-      {activeTab === 'today' ? (
-        /* Main Column Layout for Today */
-        <main className={`${styles.singleColumnLayout} animate-fade-in`}>
+          {activeTab === 'today' ? (
+            /* Original Single Column Layout for Today */
+            <main className={`${styles.singleColumnLayout} animate-fade-in`}>
 
-          {/* Console Controls */}
-          <section className={`${styles.clockConsole} ${styles.centeredConsole}`}>
-            <div className={`${styles.glass} ${clockCardClass}`}>
+              {/* Console Controls */}
+              <section className={`${styles.clockConsole} ${styles.centeredConsole}`}>
+                <div className={`${styles.glass} ${clockCardClass}`}>
             <span className={`${styles.statusIndicator} ${consoleStatusClass}`}>
               {consoleStatusText}
             </span>
@@ -1731,6 +1910,20 @@ export default function Home() {
         </main>
       )}
 
+          {/* Fixed Left Skyscraper Ad - floats in empty left margin */}
+          <div className={styles.leftSkyscraperAd}>
+            <AdsterraAd adKey="064c214ea344658e1d47e2c270be19cb" width={160} height={600} />
+          </div>
+
+          {/* Fixed Right Skyscraper Ads - float in empty right margin */}
+          <div className={styles.rightSkyscraperAd}>
+            <AdsterraAd adKey="b9ceb5cb1cf79ff98c0eab7d5017bae3" width={300} height={250} />
+            <AdsterraAd adKey="6a7a21c6c4c2d5aa3daf05beeba9c75f" width={160} height={300} />
+            <a href="https://www.effectivecpmnetwork.com/dg4gpu8v14?key=9c30efa5f6914e88e10a6663ecc5bad9" target="_blank" rel="noopener noreferrer" className={styles.smartLinkAd}>
+              🔥 Special Offer: Get Rewards Now!
+            </a>
+          </div>
+
       {/* Manual Entry / Edit Modal */}
       {showModal && (
         <div className={styles.modalOverlay} onClick={() => setShowModal(false)}>
@@ -2131,6 +2324,258 @@ export default function Home() {
                 >
                   Start Tracking
                 </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Dialer Simulation Modal */}
+      {activeAppModal === 'dialer' && (
+        <div className={styles.modalOverlay} onClick={() => setActiveAppModal(null)}>
+          <div className={`${styles.glass} ${styles.modalContent} ${styles.simModalContent}`} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.modalHeader}>
+              <h3>📞 Dialer</h3>
+              <button className={styles.modalCloseBtn} onClick={() => setActiveAppModal(null)}>✕</button>
+            </div>
+            
+            {isCalling ? (
+              <div className={styles.callingOverlay}>
+                <div className={styles.callingAvatar}>
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                    <circle cx="12" cy="7" r="4" />
+                  </svg>
+                </div>
+                <div className={styles.callingName}>{dialNumber || 'Unknown Number'}</div>
+                <div className={styles.callingStatus}>Calling... ({formatCallTime(callDuration)})</div>
+                <button type="button" className={styles.btnEndCall} onClick={() => setIsCalling(false)}>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91" />
+                    <line x1="23" y1="1" x2="1" y2="23" />
+                  </svg>
+                </button>
+              </div>
+            ) : (
+              <div className={styles.dialerContainer}>
+                <div className={styles.dialerScreen}>{dialNumber || 'Enter Number'}</div>
+                <div className={styles.dialpad}>
+                  {['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'].map((char) => (
+                    <button
+                      key={char}
+                      type="button"
+                      className={styles.dialBtn}
+                      onClick={() => setDialNumber((prev) => prev + char)}
+                    >
+                      {char}
+                    </button>
+                  ))}
+                </div>
+                <div className={styles.dialActions}>
+                  <button
+                    type="button"
+                    className={styles.btnDialDelete}
+                    onClick={() => setDialNumber((prev) => prev.slice(0, -1))}
+                    style={{ visibility: dialNumber ? 'visible' : 'hidden' }}
+                  >
+                    ⌫
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.btnCall}
+                    onClick={() => {
+                      if (dialNumber) {
+                        setIsCalling(true);
+                      }
+                    }}
+                  >
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+                    </svg>
+                  </button>
+                  <div style={{ width: 28 }}></div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Message App Simulation Modal */}
+      {activeAppModal === 'message' && (
+        <div className={styles.modalOverlay} onClick={() => setActiveAppModal(null)}>
+          <div className={`${styles.glass} ${styles.modalContent} ${styles.simModalContent}`} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.modalHeader}>
+              <h3>💬 Message App</h3>
+              <button className={styles.modalCloseBtn} onClick={() => setActiveAppModal(null)}>✕</button>
+            </div>
+            
+            <div className={styles.chatContainer}>
+              <div className={styles.chatMessages}>
+                {chatMessages.map((msg, index) => (
+                  <div
+                    key={index}
+                    className={`${styles.chatBubble} ${msg.sender === 'user' ? styles.chatBubbleUser : styles.chatBubbleBot}`}
+                  >
+                    {msg.text}
+                  </div>
+                ))}
+              </div>
+              
+              <div className={styles.chatInputArea}>
+                <input
+                  type="text"
+                  className={styles.chatInput}
+                  placeholder="Ask bot about 'stats' or 'break'..."
+                  value={chatInputText}
+                  onChange={(e) => setChatInputText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleSendMessage();
+                    }
+                  }}
+                />
+                <button type="button" className={styles.btnChatSend} onClick={handleSendMessage}>
+                  Send
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Browser App Simulation Modal */}
+      {activeAppModal === 'browser' && (
+        <div className={styles.modalOverlay} onClick={() => setActiveAppModal(null)}>
+          <div className={`${styles.glass} ${styles.modalContent} ${styles.simModalContent}`} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.modalHeader}>
+              <h3>🌐 Web Browser</h3>
+              <button className={styles.modalCloseBtn} onClick={() => setActiveAppModal(null)}>✕</button>
+            </div>
+            
+            <div className={styles.miniBrowser}>
+              <form onSubmit={(e) => { e.preventDefault(); if (browserSearchQuery.trim()) setCurrentBrowserPage('search'); }} className={styles.browserNav}>
+                <input
+                  type="text"
+                  className={styles.browserUrlBar}
+                  placeholder="Search web or enter URL..."
+                  value={browserSearchQuery}
+                  onChange={(e) => setBrowserSearchQuery(e.target.value)}
+                />
+                <button type="submit" className={styles.btnBrowserGo}>Go</button>
+              </form>
+
+              {currentBrowserPage === 'google' ? (
+                <div className={styles.browserFrame} style={{ justifyContent: 'center' }}>
+                  <h2 style={{ fontSize: '2rem', background: 'linear-gradient(to right, #4285F4, #EA4335, #FBBC05, #34A853)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', fontWeight: 800, marginBottom: '1.5rem' }}>
+                    Google
+                  </h2>
+                  <p style={{ fontSize: '0.85rem' }}>Type above to search the web anonymously</p>
+                </div>
+              ) : (
+                <div className={styles.browserFrame} style={{ overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'stretch', justifyContent: 'flex-start', textAlign: 'left' }}>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Search results for: <strong>{browserSearchQuery}</strong></div>
+                  
+                  {/* SmartLink Ad Item */}
+                  <div style={{ border: '1px solid rgba(245, 158, 11, 0.3)', background: 'rgba(245, 158, 11, 0.03)', padding: '0.75rem', borderRadius: '8px' }}>
+                    <span style={{ fontSize: '0.65rem', color: '#fbbf24', border: '1px solid #fbbf24', padding: '1px 4px', borderRadius: '3px', marginRight: '5px', fontWeight: 700 }}>AD</span>
+                    <a href="https://www.effectivecpmnetwork.com/dg4gpu8v14?key=9c30efa5f6914e88e10a6663ecc5bad9" target="_blank" rel="noopener noreferrer" style={{ fontSize: '0.9rem', color: '#60a5fa', fontWeight: 700, textDecoration: 'underline' }}>
+                      Claim Your Special Gift & Rewards Instantly
+                    </a>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>Complete simple steps and redeem points for cash, gifts, and exclusive rewards. No deposit required.</div>
+                  </div>
+
+                  {/* Organic Search Result 1 */}
+                  <div>
+                    <a href="https://en.wikipedia.org/wiki/Special:Search" target="_blank" rel="noreferrer" style={{ fontSize: '0.9rem', color: '#60a5fa', fontWeight: 600, textDecoration: 'underline' }}>
+                      {browserSearchQuery} - Wikipedia
+                    </a>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>Read the free encyclopedia entry for &quot;{browserSearchQuery}&quot;. History, definitions, references, and related topics.</div>
+                  </div>
+
+                  {/* Organic Search Result 2 */}
+                  <div>
+                    <a href="https://github.com" target="_blank" rel="noreferrer" style={{ fontSize: '0.9rem', color: '#60a5fa', fontWeight: 600, textDecoration: 'underline' }}>
+                      Open-Source Projects related to {browserSearchQuery}
+                    </a>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>Explore developer repositories, tools, codebases, and scripts for &quot;{browserSearchQuery}&quot; on GitHub.</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Camera App Simulation Modal */}
+      {activeAppModal === 'camera' && (
+        <div className={styles.modalOverlay} onClick={handleCloseCamera}>
+          <div className={`${styles.glass} ${styles.modalContent} ${styles.simModalContent}`} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.modalHeader}>
+              <h3>📷 Live Camera</h3>
+              <button className={styles.modalCloseBtn} onClick={handleCloseCamera}>✕</button>
+            </div>
+            
+            <div className={styles.cameraApp}>
+              <div className={styles.cameraViewWrapper}>
+                {cameraStream ? (
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className={styles.cameraVideo}
+                    style={{ filter: cameraFilter }}
+                  />
+                ) : (
+                  <div className={styles.cameraPlaceholder}>
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                      <circle cx="12" cy="13" r="4" />
+                    </svg>
+                    <p>Camera feed starting or blocked.<br />Ensure webcam permissions are enabled.</p>
+                  </div>
+                )}
+                {showShutterFlash && (
+                  <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, background: 'white', opacity: 0.9 }}></div>
+                )}
+              </div>
+
+              <div className={styles.filterBarContainer}>
+                <div className={styles.filterRow}>
+                  {[
+                    { id: 'none', name: 'Normal' },
+                    { id: 'sepia(0.8) contrast(1.2)', name: 'Retro Sepia' },
+                    { id: 'hue-rotate(90deg) saturate(2)', name: 'Neon Glow' },
+                    { id: 'grayscale(1) contrast(1.5)', name: 'Obsidian' },
+                    { id: 'hue-rotate(120deg) brightness(1.2) contrast(1.5)', name: 'Matrix' },
+                  ].map((filter) => (
+                    <button
+                      key={filter.id}
+                      type="button"
+                      className={`${styles.btnFilter} ${cameraFilter === filter.id ? styles.btnFilterActive : ''}`}
+                      onClick={() => setCameraFilter(filter.id)}
+                    >
+                      {filter.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                <button
+                  type="button"
+                  className={styles.cameraShutterBtn}
+                  onClick={() => {
+                    if (cameraStream) {
+                      setShowShutterFlash(true);
+                      setTimeout(() => setShowShutterFlash(false), 300);
+                      alert("📸 Snapshot simulation captured successfully!");
+                    }
+                  }}
+                  title="Take Photo"
+                />
               </div>
             </div>
           </div>
