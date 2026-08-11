@@ -1,6 +1,7 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
-import { getDatabase, ref, onValue, set, DataSnapshot } from "firebase/database";
+import { getDatabase } from "firebase/database";
+import { getRemoteConfig } from "firebase/remote-config";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDvH-PXfYjuUFk1HH91tgruIfHFsL6cmSA",
@@ -13,7 +14,7 @@ const firebaseConfig = {
   measurementId: "G-0VB6QV46V2"
 };
 
-// Initialize Firebase App
+// Initialize Firebase App (singleton)
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
 export const adminEmails = ['woxxinsolution12@gmail.com'];
@@ -33,6 +34,17 @@ export const isAdmin = async (_uid: string, email: string | null): Promise<boole
 export const auth = getAuth(app);
 export const db = getDatabase(app);
 export const googleProvider = new GoogleAuthProvider();
+
+// Initialize Remote Config
+export const remoteConfig = getRemoteConfig(app);
+
+// Default values — used as fallback when offline or on first load before fetch
+remoteConfig.defaultConfig = {
+  appConfig: 1, // 1 = show ads, 0 = hide ads
+};
+
+// Minimum interval between Remote Config fetches (1 hour in production)
+remoteConfig.settings.minimumFetchIntervalMillis = 3600000;
 
 // Apply custom parameters for Google Provider
 googleProvider.setCustomParameters({

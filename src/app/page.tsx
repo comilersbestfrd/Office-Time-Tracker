@@ -3,9 +3,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import styles from './page.module.css';
-import { auth, db, googleProvider } from '@/lib/firebase';
+import { auth, db, googleProvider, remoteConfig } from '@/lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { ref, onValue, set, get } from 'firebase/database';
+import { fetchAndActivate, getValue } from 'firebase/remote-config';
 import { RecordSession, DayRecord, DashboardStats, calculateRecordHours, Holiday } from '@/lib/calculations';
 
 import AdsterraAd from './components/AdsterraAd';
@@ -15,6 +16,10 @@ const ADMIN_EMAIL = 'woxxinsolution12@gmail.com';
 
 export default function Home() {
   const router = useRouter();
+
+  // Remote Config: controls whether ads are shown
+  // appConfig === 1 => show ads, appConfig === 0 => hide ads
+  const [showAds, setShowAds] = useState<boolean>(true);
 
   // App Simulation States
   const [activeAppModal, setActiveAppModal] = useState<'dialer' | 'message' | 'browser' | 'camera' | null>(null);
@@ -309,8 +314,23 @@ export default function Home() {
 
   }, []);
 
-  // SocialBar Script Effect
+  // Firebase Remote Config: fetch appConfig and gate ads
   useEffect(() => {
+    fetchAndActivate(remoteConfig)
+      .then(() => {
+        const val = getValue(remoteConfig, 'appConfig').asNumber();
+        // 1 = show ads, 0 = hide ads
+        setShowAds(val === 1);
+      })
+      .catch((err) => {
+        console.warn('Remote Config fetch failed, using default (show ads):', err);
+        setShowAds(true); // fallback: show ads
+      });
+  }, []);
+
+  // SocialBar Script Effect — only inject when ads are enabled
+  useEffect(() => {
+    if (!showAds) return;
     // Inject SocialBar overlay script safely
     const socialBarScript = document.createElement('script');
     socialBarScript.src = 'https://pl30780812.effectivecpmnetwork.com/4a/06/b0/4a06b011b3a6976348b4f34ff393dfb0.js';
@@ -322,7 +342,7 @@ export default function Home() {
         document.body.removeChild(socialBarScript);
       }
     };
-  }, []);
+  }, [showAds]);
 
   // Dialer Call Timer Effect
   useEffect(() => {
@@ -1910,19 +1930,24 @@ export default function Home() {
         </main>
       )}
 
-          {/* Fixed Left Skyscraper Ad - floats in empty left margin */}
-          <div className={styles.leftSkyscraperAd}>
-            <AdsterraAd adKey="064c214ea344658e1d47e2c270be19cb" width={160} height={600} />
-          </div>
+          {/* Ads gated by Firebase Remote Config appConfig (1=show, 0=hide) */}
+          {showAds && (
+            <>
+              {/* Fixed Left Skyscraper Ad - floats in empty left margin */}
+              <div className={styles.leftSkyscraperAd}>
+                <AdsterraAd adKey="064c214ea344658e1d47e2c270be19cb" width={160} height={600} />
+              </div>
 
-          {/* Fixed Right Skyscraper Ads - float in empty right margin */}
-          <div className={styles.rightSkyscraperAd}>
-            <AdsterraAd adKey="b9ceb5cb1cf79ff98c0eab7d5017bae3" width={300} height={250} />
-            <AdsterraAd adKey="6a7a21c6c4c2d5aa3daf05beeba9c75f" width={160} height={300} />
-            <a href="https://www.effectivecpmnetwork.com/dg4gpu8v14?key=9c30efa5f6914e88e10a6663ecc5bad9" target="_blank" rel="noopener noreferrer" className={styles.smartLinkAd}>
-              🔥 Special Offer: Get Rewards Now!
-            </a>
-          </div>
+              {/* Fixed Right Skyscraper Ads - float in empty right margin */}
+              <div className={styles.rightSkyscraperAd}>
+                <AdsterraAd adKey="b9ceb5cb1cf79ff98c0eab7d5017bae3" width={300} height={250} />
+                <AdsterraAd adKey="6a7a21c6c4c2d5aa3daf05beeba9c75f" width={160} height={300} />
+                <a href="https://www.effectivecpmnetwork.com/dg4gpu8v14?key=9c30efa5f6914e88e10a6663ecc5bad9" target="_blank" rel="noopener noreferrer" className={styles.smartLinkAd}>
+                  🔥 Special Offer: Get Rewards Now!
+                </a>
+              </div>
+            </>
+          )}
 
       {/* Manual Entry / Edit Modal */}
       {showModal && (
