@@ -431,7 +431,10 @@ export default function Home() {
     if (!showAds || isAdBlockActive || adRefreshTime <= 0) return;
 
     const interval = setInterval(() => {
-      setRefreshTrigger((prev) => prev + 1);
+      // Only increment refresh trigger and reload ad iframes if the browser tab is active/visible
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        setRefreshTrigger((prev) => prev + 1);
+      }
     }, adRefreshTime * 1000);
 
     return () => clearInterval(interval);
