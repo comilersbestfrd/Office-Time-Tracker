@@ -40,7 +40,7 @@ export const remoteConfig = getRemoteConfig(app);
 
 // Default values — used as fallback when offline or on first load before fetch
 remoteConfig.defaultConfig = {
-  appConfig: 1, // 1 = show ads, 0 = hide ads
+  appConfig: JSON.stringify({ adStatus: 1 }), // Default JSON string configuration
 };
 
 // Minimum interval between Remote Config fetches (1 hour in production)

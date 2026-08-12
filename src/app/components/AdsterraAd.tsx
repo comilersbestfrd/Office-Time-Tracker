@@ -4,9 +4,10 @@ interface AdsterraAdProps {
   adKey: string;
   width: number;
   height: number;
+  refreshTrigger?: number;
 }
 
-export default function AdsterraAd({ adKey, width, height }: AdsterraAdProps) {
+export default function AdsterraAd({ adKey, width, height, refreshTrigger }: AdsterraAdProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
@@ -48,7 +49,7 @@ export default function AdsterraAd({ adKey, width, height }: AdsterraAdProps) {
       </html>
     `);
     doc.close();
-  }, [adKey, width, height]);
+  }, [adKey, width, height, refreshTrigger]);
 
   return (
     <div style={{ width, height, display: 'flex', justifyContent: 'center', margin: '0.75rem auto' }}>

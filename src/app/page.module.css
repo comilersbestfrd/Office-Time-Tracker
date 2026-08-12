@@ -1635,13 +1635,21 @@
   display: none;
 }
 
-@media (min-width: 1760px) {
+.wideAdOnly {
+  display: none;
+}
+
+@media (min-width: 1500px) {
+  .dashboard {
+    max-width: 1200px !important;
+  }
+
   .leftSkyscraperAd {
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
     position: fixed;
-    left: calc(50vw - 700px - 180px); /* Centers left 160px ad in 260px margin */
+    left: calc(50vw - 600px - 165px); /* Leaves 3px to screen edge and 5px to dashboard at 1530px */
     top: 120px;
     width: 160px;
     z-index: 90;
@@ -1653,11 +1661,22 @@
     flex-direction: column;
     gap: 1.5rem;
     position: fixed;
-    right: calc(50vw - 700px - 320px); /* Centers right 300px ad in margin */
+    right: calc(50vw - 600px - 165px); /* Leaves 3px to screen edge and 5px to dashboard at 1530px */
     top: 120px;
-    width: 300px;
+    width: 160px;
     z-index: 90;
     align-items: center;
+  }
+}
+
+@media (min-width: 1810px) {
+  .rightSkyscraperAd {
+    right: calc(50vw - 600px - 305px); /* Aligns 300px ad with 5px gap to dashboard */
+    width: 300px;
+  }
+
+  .wideAdOnly {
+    display: block;
   }
 }
 
@@ -2202,5 +2221,82 @@
   background: var(--accent-blue);
   color: white;
   border-color: var(--accent-blue);
+}
+
+/* AdBlocker Forceful Overlay Modal */
+.adBlockOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(10, 10, 12, 0.95);
+  backdrop-filter: blur(12px);
+  z-index: 99999;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 2rem;
+}
+
+.adBlockContent {
+  max-width: 500px;
+  width: 100%;
+  background: rgba(20, 20, 25, 0.7) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: 20px !important;
+  padding: 3rem 2rem !important;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.adBlockIcon {
+  width: 80px;
+  height: 80px;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ef4444;
+  margin-bottom: 0.5rem;
+}
+
+.adBlockTitle {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: #fff;
+  margin: 0;
+}
+
+.adBlockDesc {
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.adBlockBtn {
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  color: #fff;
+  border: none;
+  padding: 0.85rem 2rem;
+  border-radius: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: var(--transition-smooth);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+}
+
+.adBlockBtn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 18px rgba(239, 68, 68, 0.5);
 }
 

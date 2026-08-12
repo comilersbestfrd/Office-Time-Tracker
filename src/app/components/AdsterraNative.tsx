@@ -1,6 +1,10 @@
 import React, { useEffect, useRef } from 'react';
 
-export default function AdsterraNative() {
+interface AdsterraNativeProps {
+  refreshTrigger?: number;
+}
+
+export default function AdsterraNative({ refreshTrigger }: AdsterraNativeProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
@@ -30,7 +34,7 @@ export default function AdsterraNative() {
       </html>
     `);
     doc.close();
-  }, []);
+  }, [refreshTrigger]);
 
   return (
     <div style={{ width: '100%', margin: '1.25rem 0' }}>

@@ -6,7 +6,7 @@ import styles from './page.module.css';
 import { auth, db, googleProvider, remoteConfig } from '@/lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { ref, onValue, set, get } from 'firebase/database';
-import { fetchAndActivate, getValue } from 'firebase/remote-config';
+import { fetchAndActivate, getValue, onConfigUpdate, activate } from 'firebase/remote-config';
 import { RecordSession, DayRecord, DashboardStats, calculateRecordHours, Holiday } from '@/lib/calculations';
 
 import AdsterraAd from './components/AdsterraAd';
@@ -14,12 +14,55 @@ import AdsterraNative from './components/AdsterraNative';
 
 const ADMIN_EMAIL = 'woxxinsolution12@gmail.com';
 
+const detectAdBlocker = async (): Promise<boolean> => {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return false;
+
+  // Test 1: Fetch common ad script domains
+  try {
+    await fetch('https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js', {
+      method: 'HEAD',
+      mode: 'no-cors',
+      cache: 'no-store'
+    });
+  } catch (error) {
+    return true; // Blocked by network rule
+  }
+
+  try {
+    await fetch('https://www.highperformanceformat.com/6a7a21c6c4c2d5aa3daf05beeba9c75f/invoke.js', {
+      method: 'HEAD',
+      mode: 'no-cors',
+      cache: 'no-store'
+    });
+  } catch (error) {
+    return true; // Blocked by network rule
+  }
+
+  // Test 2: Check hidden DOM element height (some blockers use cosmetic filter hiding)
+  const testAd = document.createElement('div');
+  testAd.className = 'adsbox ad-placement doubleclick-ad ad-placeholder';
+  testAd.style.position = 'absolute';
+  testAd.style.left = '-9999px';
+  testAd.style.top = '-9999px';
+  testAd.style.width = '1px';
+  testAd.style.height = '1px';
+  document.body.appendChild(testAd);
+
+  const isHidden = window.getComputedStyle(testAd).display === 'none' || testAd.offsetHeight === 0;
+  document.body.removeChild(testAd);
+
+  return isHidden;
+};
+
 export default function Home() {
   const router = useRouter();
 
   // Remote Config: controls whether ads are shown
   // appConfig === 1 => show ads, appConfig === 0 => hide ads
   const [showAds, setShowAds] = useState<boolean>(true);
+  const [isAdBlockActive, setIsAdBlockActive] = useState<boolean>(false);
+  const [adRefreshTime, setAdRefreshTime] = useState<number>(15);
+  const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
 
   // App Simulation States
   const [activeAppModal, setActiveAppModal] = useState<'dialer' | 'message' | 'browser' | 'camera' | null>(null);
@@ -314,23 +357,89 @@ export default function Home() {
 
   }, []);
 
-  // Firebase Remote Config: fetch appConfig and gate ads
+  // Firebase Remote Config: fetch appConfig, handle updates and ad refresh
   useEffect(() => {
+    const handleConfigParse = () => {
+      const valStr = getValue(remoteConfig, 'appConfig').asString();
+      try {
+        const parsed = JSON.parse(valStr);
+        // 1 = show ads, 0 = hide ads
+        setShowAds(parsed.adStatus === 1);
+        if (typeof parsed.adRefreshTime === 'number' && parsed.adRefreshTime > 0) {
+          setAdRefreshTime(parsed.adRefreshTime);
+        }
+      } catch (e) {
+        console.warn('Failed to parse appConfig JSON string:', valStr, e);
+        setShowAds(true); // fallback: show ads
+        setAdRefreshTime(15);
+      }
+    };
+
+    // 1. Initial fetch & activate
     fetchAndActivate(remoteConfig)
       .then(() => {
-        const val = getValue(remoteConfig, 'appConfig').asNumber();
-        // 1 = show ads, 0 = hide ads
-        setShowAds(val === 1);
+        handleConfigParse();
       })
       .catch((err) => {
         console.warn('Remote Config fetch failed, using default (show ads):', err);
         setShowAds(true); // fallback: show ads
+        setAdRefreshTime(15);
       });
+
+    // 2. Real-time Remote Config updates subscription
+    try {
+      const unsubscribe = onConfigUpdate(remoteConfig, {
+        next: (configUpdate) => {
+          activate(remoteConfig)
+            .then(() => {
+              handleConfigParse();
+            })
+            .catch((activateErr) => {
+              console.error('Remote Config activation failed:', activateErr);
+            });
+        },
+        error: (err) => {
+          console.warn('Remote Config real-time update error:', err);
+        },
+        complete: () => {}
+      });
+      return () => unsubscribe();
+    } catch (realtimeErr) {
+      console.warn('Realtime Remote Config not supported or failed to init:', realtimeErr);
+    }
   }, []);
 
-  // SocialBar Script Effect — only inject when ads are enabled
+  // AdBlocker check effect
   useEffect(() => {
-    if (!showAds) return;
+    if (!showAds) {
+      setIsAdBlockActive(false);
+      return;
+    }
+
+    const checkBlocker = async () => {
+      // Small timeout to let initial script loading attempt execute
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      const isBlocked = await detectAdBlocker();
+      setIsAdBlockActive(isBlocked);
+    };
+
+    checkBlocker();
+  }, [showAds]);
+
+  // Periodic Ad Refresh scheduler
+  useEffect(() => {
+    if (!showAds || isAdBlockActive || adRefreshTime <= 0) return;
+
+    const interval = setInterval(() => {
+      setRefreshTrigger((prev) => prev + 1);
+    }, adRefreshTime * 1000);
+
+    return () => clearInterval(interval);
+  }, [showAds, isAdBlockActive, adRefreshTime]);
+
+  // SocialBar Script Effect — only inject when ads are enabled and no adblocker is active
+  useEffect(() => {
+    if (!showAds || isAdBlockActive) return;
     // Inject SocialBar overlay script safely
     const socialBarScript = document.createElement('script');
     socialBarScript.src = 'https://pl30780812.effectivecpmnetwork.com/4a/06/b0/4a06b011b3a6976348b4f34ff393dfb0.js';
@@ -342,7 +451,7 @@ export default function Home() {
         document.body.removeChild(socialBarScript);
       }
     };
-  }, [showAds]);
+  }, [showAds, isAdBlockActive]);
 
   // Dialer Call Timer Effect
   useEffect(() => {
@@ -658,17 +767,25 @@ export default function Home() {
     const diffMs = now.getTime() - start.getTime();
     const diffMins = Math.max(0, diffMs / 60000);
 
-    const newSession: RecordSession = {
-      start: freshTodayRecord.activeRestStart,
-      end: now.toISOString(),
-    };
-
-    const updatedRecord: DayRecord = {
-      ...freshTodayRecord,
-      activeRestStart: null,
-      restTimeTotal: (freshTodayRecord.restTimeTotal || 0) + diffMins,
-      restSessions: [...(freshTodayRecord.restSessions || []), newSession],
-    };
+    let updatedRecord: DayRecord;
+    // If break is less than 60 seconds, discard it as an accidental click
+    if (diffMs < 60000) {
+      updatedRecord = {
+        ...freshTodayRecord,
+        activeRestStart: null,
+      };
+    } else {
+      const newSession: RecordSession = {
+        start: freshTodayRecord.activeRestStart,
+        end: now.toISOString(),
+      };
+      updatedRecord = {
+        ...freshTodayRecord,
+        activeRestStart: null,
+        restTimeTotal: (freshTodayRecord.restTimeTotal || 0) + diffMins,
+        restSessions: [...(freshTodayRecord.restSessions || []), newSession],
+      };
+    }
 
     await saveRecordApi(updatedRecord);
   };
@@ -686,14 +803,16 @@ export default function Home() {
       const diffMs = now.getTime() - start.getTime();
       const diffMins = Math.max(0, diffMs / 60000);
 
-      const newSession: RecordSession = {
-        start: updatedRecord.activeRestStart,
-        end: now.toISOString(),
-      };
-
+      // Only save if break is at least 60 seconds
+      if (diffMs >= 60000) {
+        const newSession: RecordSession = {
+          start: updatedRecord.activeRestStart,
+          end: now.toISOString(),
+        };
+        updatedRecord.restTimeTotal = (updatedRecord.restTimeTotal || 0) + diffMins;
+        updatedRecord.restSessions = [...(updatedRecord.restSessions || []), newSession];
+      }
       updatedRecord.activeRestStart = null;
-      updatedRecord.restTimeTotal = (updatedRecord.restTimeTotal || 0) + diffMins;
-      updatedRecord.restSessions = [...(updatedRecord.restSessions || []), newSession];
     }
 
     updatedRecord.outTime = new Date().toISOString();
@@ -718,8 +837,9 @@ export default function Home() {
     const startDate = new Date(localStartStr);
     const endDate = new Date(localEndStr);
 
-    if (endDate.getTime() <= startDate.getTime()) {
-      alert('Break end time must be after the start time!');
+    const diffMs = endDate.getTime() - startDate.getTime();
+    if (Math.round(diffMs / 60000) <= 0) {
+      alert('Break duration must be at least 1 minute!');
       return;
     }
 
@@ -1050,8 +1170,8 @@ export default function Home() {
     }
 
     const durationMins = (endDate.getTime() - startDate.getTime()) / 60000;
-    if (durationMins <= 0) {
-      alert("Break end time must be after the start time!");
+    if (Math.round(durationMins) <= 0) {
+      alert("Break duration must be at least 1 minute!");
       return;
     }
 
@@ -1935,17 +2055,22 @@ export default function Home() {
             <>
               {/* Fixed Left Skyscraper Ad - floats in empty left margin */}
               <div className={styles.leftSkyscraperAd}>
-                <AdsterraAd adKey="064c214ea344658e1d47e2c270be19cb" width={160} height={600} />
+                <AdsterraAd adKey="064c214ea344658e1d47e2c270be19cb" width={160} height={600} refreshTrigger={refreshTrigger} />
               </div>
 
               {/* Fixed Right Skyscraper Ads - float in empty right margin */}
               <div className={styles.rightSkyscraperAd}>
-                <AdsterraAd adKey="b9ceb5cb1cf79ff98c0eab7d5017bae3" width={300} height={250} />
-                <AdsterraAd adKey="6a7a21c6c4c2d5aa3daf05beeba9c75f" width={160} height={300} />
+                <div className={styles.wideAdOnly}>
+                  <AdsterraAd adKey="b9ceb5cb1cf79ff98c0eab7d5017bae3" width={300} height={250} refreshTrigger={refreshTrigger} />
+                </div>
+                <AdsterraAd adKey="6a7a21c6c4c2d5aa3daf05beeba9c75f" width={160} height={300} refreshTrigger={refreshTrigger} />
                 <a href="https://www.effectivecpmnetwork.com/dg4gpu8v14?key=9c30efa5f6914e88e10a6663ecc5bad9" target="_blank" rel="noopener noreferrer" className={styles.smartLinkAd}>
                   🔥 Special Offer: Get Rewards Now!
                 </a>
               </div>
+
+              {/* Native Banner Ad - rendered at the bottom of the page content */}
+              <AdsterraNative refreshTrigger={refreshTrigger} />
             </>
           )}
 
@@ -2607,6 +2732,34 @@ export default function Home() {
         </div>
       )}
 
+      {/* AdBlocker Forceful Overlay Modal */}
+      {isAdBlockActive && (
+        <div className={styles.adBlockOverlay}>
+          <div className={`${styles.glass} ${styles.adBlockContent}`}>
+            <div className={styles.adBlockIcon}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+            </div>
+            <h2 className={styles.adBlockTitle}>Adblocker Detected</h2>
+            <p className={styles.adBlockDesc}>
+              We detected that you are using an adblocker. Please disable your adblocker to continue using Office Time Tracker.
+            </p>
+            <button
+              type="button"
+              className={styles.adBlockBtn}
+              onClick={() => window.location.reload()}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+              </svg>
+              <span>Check Again & Refresh</span>
+            </button>
+          </div>
+        </div>
+      )}
         </>
       )}
     </div>
