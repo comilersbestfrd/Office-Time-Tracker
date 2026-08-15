@@ -16,6 +16,7 @@ export interface DayRecord {
   lunchDeduction?: number; // in minutes
   notes?: string;
   isAutoClockedOut?: boolean;
+  allowedRestLimit?: number; // custom allowed rest limit in minutes
 }
 
 export interface Holiday {
@@ -34,7 +35,7 @@ export interface DashboardStats {
 }
 
 // Calculate hours for a single day record
-export function calculateRecordHours(record: DayRecord, nowStr?: string): DayRecord {
+export function calculateRecordHours(record: DayRecord, nowStr?: string, defaultAllowedRest: number = 20): DayRecord {
   if (record.status !== 'present') {
     return {
       ...record,
@@ -104,8 +105,8 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string): DayRec
     }
   }
 
-  // Allowed rest is 20 minutes. Deduct excess break time from actual worked hours.
-  const allowedRest = 20;
+  // Allowed rest limit. Deduct excess break time from actual worked hours.
+  const allowedRest = record.allowedRestLimit !== undefined ? record.allowedRestLimit : defaultAllowedRest;
   const excessRestMinutes = Math.max(0, totalRestMinutes - allowedRest);
 
   // Worked hours = (net elapsed time - excess rest time)

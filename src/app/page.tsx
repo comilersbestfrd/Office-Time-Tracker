@@ -63,6 +63,10 @@ export default function Home() {
   const [isAdBlockActive, setIsAdBlockActive] = useState<boolean>(false);
   const [adRefreshTime, setAdRefreshTime] = useState<number>(15);
   const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
+  const [defaultDailyRestLimit, setDefaultDailyRestLimit] = useState<number>(20);
+  const [allowedRestLimit, setAllowedRestLimit] = useState<number>(20);
+  const [liveActiveBreakMs, setLiveActiveBreakMs] = useState<number>(0);
+  const [isPipOpen, setIsPipOpen] = useState<boolean>(false);
 
   // App Simulation States
   const [activeAppModal, setActiveAppModal] = useState<'dialer' | 'message' | 'browser' | 'camera' | null>(null);
@@ -92,6 +96,7 @@ export default function Home() {
   // Data States
   const [records, setRecords] = useState<DayRecord[]>([]);
   const recordsRef = useRef<DayRecord[]>([]);
+  const pipWindowRef = useRef<any>(null);
   const [holidays, setHolidays] = useState<Holiday[]>([]);
 
   useEffect(() => {
@@ -173,12 +178,35 @@ export default function Home() {
   const todayRecord = records.find((r) => r.date === todayStr);
   const modalRecord = records.find((r) => r.date === modalDate);
 
+  // Load saved default rest limit from localStorage on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('office_timer_default_rest_limit');
+      if (saved) {
+        const parsed = parseInt(saved, 10);
+        if (!isNaN(parsed) && parsed > 0) {
+          setDefaultDailyRestLimit(parsed);
+          setAllowedRestLimit(parsed);
+        }
+      }
+    }
+  }, []);
+
+  // Keep allowedRestLimit in sync with active record or user default daily limit
+  useEffect(() => {
+    if (todayRecord && todayRecord.allowedRestLimit !== undefined) {
+      setAllowedRestLimit(todayRecord.allowedRestLimit);
+    } else {
+      setAllowedRestLimit(defaultDailyRestLimit);
+    }
+  }, [todayRecord, defaultDailyRestLimit]);
+
   // Fetch local data (when signed out / offline)
   const fetchLocalData = async () => {
     try {
       const recordsRes = await fetch('/api/records');
       const recordsData: DayRecord[] = await recordsRes.json();
-      const recalculated = recordsData.map(r => calculateRecordHours(r));
+      const recalculated = recordsData.map(r => calculateRecordHours(r, undefined, defaultDailyRestLimit));
       setRecords(recalculated);
 
       const statsRes = await fetch('/api/stats');
@@ -199,11 +227,21 @@ export default function Home() {
       setUser(currentUser);
       setAuthLoading(false);
       if (currentUser) {
-        // Check if user already has a username
+        // Check if user already has a username & default daily rest limit
         try {
           const profileRef = ref(db, `users/${currentUser.uid}/profile`);
           const snapshot = await get(profileRef);
           const existingProfile = snapshot.val();
+
+          if (existingProfile?.defaultDailyRestLimit) {
+            const savedLimit = Number(existingProfile.defaultDailyRestLimit);
+            if (!isNaN(savedLimit) && savedLimit > 0) {
+              setDefaultDailyRestLimit(savedLimit);
+              if (typeof window !== 'undefined') {
+                localStorage.setItem('office_timer_default_rest_limit', String(savedLimit));
+              }
+            }
+          }
 
           if (existingProfile?.username) {
             // User already has a username, just update lastLogin
@@ -225,6 +263,7 @@ export default function Home() {
               photoURL: currentUser.photoURL || '',
               lastLogin: new Date().toISOString(),
               username: '',
+              defaultDailyRestLimit: defaultDailyRestLimit || 20,
             });
           }
         } catch (e) {
@@ -251,7 +290,7 @@ export default function Home() {
       const data = snapshot.val();
       if (data) {
         const list: DayRecord[] = Object.values(data);
-        const recalculated = list.map(r => calculateRecordHours(r));
+        const recalculated = list.map(r => calculateRecordHours(r, undefined, defaultDailyRestLimit));
         const sorted = recalculated.sort((a, b) => a.date.localeCompare(b.date));
         setRecords(sorted);
       } else {
@@ -262,7 +301,7 @@ export default function Home() {
     return () => {
       unsubscribe();
     };
-  }, [user]);
+  }, [user, defaultDailyRestLimit]);
 
   // Listen to holidays in Firebase
   useEffect(() => {
@@ -455,6 +494,57 @@ export default function Home() {
       }
     };
   }, [showAds, isAdBlockActive]);
+  // Break Running Background Notification — fires when tab is hidden or minimized while break is active
+  useEffect(() => {
+    const isBreakActive = !!(todayRecord?.status === 'present' && todayRecord?.activeRestStart);
+    if (!isBreakActive) {
+      if (typeof document !== 'undefined') {
+        document.title = 'Office Time Tracker';
+      }
+      return;
+    }
+
+    const sendBreakNotification = () => {
+      if (
+        typeof document !== 'undefined' &&
+        document.visibilityState === 'hidden' &&
+        typeof Notification !== 'undefined' &&
+        Notification.permission === 'granted'
+      ) {
+        const durationStr = new Date(Date.now() - new Date(todayRecord!.activeRestStart!).getTime())
+          .toISOString()
+          .substr(11, 8);
+        try {
+          const notif = new Notification('☕ Break is Running!', {
+            body: `Your break has been running for ${durationStr}. Click to resume work.`,
+            icon: '/favicon.ico',
+            tag: 'break-reminder',
+            requireInteraction: true, // Keeps notification toast pinned on Windows desktop!
+          });
+          notif.onclick = () => {
+            window.focus();
+            notif.close();
+          };
+        } catch (err) {
+          console.warn('Could not trigger notification:', err);
+        }
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        sendBreakNotification();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    const notifInterval = setInterval(sendBreakNotification, 60 * 1000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      clearInterval(notifInterval);
+    };
+  }, [todayRecord?.activeRestStart]);
 
   // Dialer Call Timer Effect
   useEffect(() => {
@@ -654,11 +744,39 @@ export default function Home() {
         lunchOverlapMs = overlapEnd.getTime() - overlapStart.getTime();
       }
 
-      // Calculate Worked Time
+      // Calculate Worked Time using dynamic or default limit
+      const currentRestLimit = todayRecord.allowedRestLimit !== undefined ? todayRecord.allowedRestLimit : 20;
       const elapsedMs = now.getTime() - inTime.getTime();
-      const allowedRestMs = 20 * 60 * 1000;
+      const allowedRestMs = currentRestLimit * 60 * 1000;
       const excessRestMs = Math.max(0, totalRestMs - allowedRestMs);
       const workedMs = Math.max(0, elapsedMs - lunchOverlapMs - excessRestMs);
+
+      // Calculate running active break timer
+      let activeBreakMs = 0;
+      if (todayRecord.activeRestStart) {
+        const restStart = new Date(todayRecord.activeRestStart);
+        activeBreakMs = Math.max(0, now.getTime() - restStart.getTime());
+      }
+      setLiveActiveBreakMs(activeBreakMs);
+
+      // Update PiP floating window if open
+      if (pipWindowRef.current && !pipWindowRef.current.closed) {
+        const timerEl = pipWindowRef.current.document.getElementById('pip-timer');
+        if (timerEl) {
+          timerEl.textContent = formatMsToHMS(activeBreakMs);
+        }
+      }
+
+      // Live Tab Title in taskbar/browser
+      if (typeof document !== 'undefined') {
+        if (todayRecord.activeRestStart) {
+          document.title = `☕ [${formatMsToHMS(activeBreakMs)}] Break Running - Office Timer`;
+        } else if (todayRecord.status === 'present' && !todayRecord.outTime) {
+          document.title = `⏱️ [${formatMsToHMS(workedMs)}] Working - Office Timer`;
+        } else {
+          document.title = 'Office Time Tracker';
+        }
+      }
 
       // Convert to display strings
       setLiveWorkedTime(formatMsToHMS(workedMs));
@@ -744,12 +862,124 @@ export default function Home() {
       activeRestStart: null,
       workedHours: 0,
       pendingHours: 8,
+      allowedRestLimit: defaultDailyRestLimit,
     };
 
     await saveRecordApi(newRecord);
   };
 
+  const openDesktopPipWidget = async () => {
+    if (typeof window === 'undefined' || !('documentPictureInPicture' in window)) {
+      return;
+    }
+    try {
+      if (pipWindowRef.current && !pipWindowRef.current.closed) {
+        pipWindowRef.current.focus();
+        return;
+      }
+      // @ts-ignore
+      const pip = await window.documentPictureInPicture.requestWindow({
+        width: 320,
+        height: 180,
+      });
+      pipWindowRef.current = pip;
+      setIsPipOpen(true);
+
+      // Inject styling and HTML
+      pip.document.head.innerHTML = `
+        <title>☕ Break Running - Office Timer</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+          body {
+            background: #090d16;
+            color: #f8fafc;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            padding: 14px;
+            user-select: none;
+          }
+          .header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            font-weight: 700;
+            color: #fbbf24;
+            margin-bottom: 6px;
+          }
+          .pulse {
+            width: 8px;
+            height: 8px;
+            background: #ef4444;
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 8px #ef4444;
+          }
+          .timer {
+            font-size: 32px;
+            font-weight: 800;
+            font-family: monospace;
+            color: #38bdf8;
+            margin-bottom: 10px;
+            letter-spacing: 1px;
+          }
+          .btn {
+            background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+            color: white;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+            width: 100%;
+            transition: transform 0.1s, opacity 0.2s;
+          }
+          .btn:hover {
+            opacity: 0.9;
+            transform: scale(1.02);
+          }
+        </style>
+      `;
+
+      pip.document.body.innerHTML = `
+        <div class="header"><span class="pulse"></span> ☕ Break in Progress</div>
+        <div id="pip-timer" class="timer">00:00:00</div>
+        <button id="pip-resume-btn" class="btn">⏸️ Resume Work</button>
+      `;
+
+      const btn = pip.document.getElementById('pip-resume-btn');
+      if (btn) {
+        btn.addEventListener('click', () => {
+          handleEndRest();
+          try {
+            pip.close();
+          } catch (e) {}
+          setIsPipOpen(false);
+        });
+      }
+
+      pip.addEventListener('pagehide', () => {
+        pipWindowRef.current = null;
+        setIsPipOpen(false);
+      });
+    } catch (e) {
+      console.warn('Document Picture-in-Picture not available or user closed:', e);
+      setIsPipOpen(false);
+    }
+  };
+
   const handleStartRest = async () => {
+    // Explicitly request notification permission during click gesture
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      try {
+        Notification.requestPermission();
+      } catch (e) {}
+    }
+
     const todayStrLocal = getTodayDateString();
     const freshTodayRecord = recordsRef.current.find((r) => r.date === todayStrLocal);
     if (!freshTodayRecord) return;
@@ -759,9 +989,22 @@ export default function Home() {
     };
 
     await saveRecordApi(updatedRecord);
+
+    // If supported, open Picture-in-Picture floating desktop widget
+    if (typeof window !== 'undefined' && 'documentPictureInPicture' in window) {
+      openDesktopPipWidget();
+    }
   };
 
   const handleEndRest = async () => {
+    if (pipWindowRef.current && !pipWindowRef.current.closed) {
+      try {
+        pipWindowRef.current.close();
+      } catch (e) {}
+      pipWindowRef.current = null;
+    }
+    setIsPipOpen(false);
+
     const todayStrLocal = getTodayDateString();
     const freshTodayRecord = recordsRef.current.find((r) => r.date === todayStrLocal);
     if (!freshTodayRecord || !freshTodayRecord.activeRestStart) return;
@@ -793,7 +1036,60 @@ export default function Home() {
     await saveRecordApi(updatedRecord);
   };
 
+  const handleAdjustRestLimit = async (amount: number) => {
+    const todayStrLocal = getTodayDateString();
+    const freshTodayRecord = recordsRef.current.find((r) => r.date === todayStrLocal);
+
+    const currentLimit = freshTodayRecord?.allowedRestLimit !== undefined 
+      ? freshTodayRecord.allowedRestLimit 
+      : (allowedRestLimit || defaultDailyRestLimit || 20);
+    const newLimit = Math.max(5, currentLimit + amount);
+
+    setAllowedRestLimit(newLimit);
+    setDefaultDailyRestLimit(newLimit);
+
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('office_timer_default_rest_limit', String(newLimit));
+      } catch (e) {
+        console.warn('Could not save rest limit to localStorage:', e);
+      }
+    }
+
+    if (user) {
+      try {
+        const profileRef = ref(db, `users/${user.uid}/profile`);
+        const snapshot = await get(profileRef);
+        const existingProfile = snapshot.val() || {};
+        await set(profileRef, {
+          ...existingProfile,
+          defaultDailyRestLimit: newLimit,
+        });
+      } catch (e) {
+        console.warn('Could not save default rest limit to profile:', e);
+      }
+    }
+
+    if (freshTodayRecord) {
+      const updatedRecord: DayRecord = {
+        ...freshTodayRecord,
+        allowedRestLimit: newLimit,
+      };
+
+      const calculated = calculateRecordHours(updatedRecord, undefined, newLimit);
+      await saveRecordApi(calculated);
+    }
+  };
+
   const handleClockOut = async () => {
+    if (pipWindowRef.current && !pipWindowRef.current.closed) {
+      try {
+        pipWindowRef.current.close();
+      } catch (e) {}
+      pipWindowRef.current = null;
+    }
+    setIsPipOpen(false);
+
     const todayStrLocal = getTodayDateString();
     const freshTodayRecord = recordsRef.current.find((r) => r.date === todayStrLocal);
     if (!freshTodayRecord) return;
@@ -931,6 +1227,7 @@ export default function Home() {
       activeRestStart: null,
       workedHours: 0,
       pendingHours: 8,
+      allowedRestLimit: defaultDailyRestLimit,
     };
 
     await saveRecordApi(newRecord);
@@ -986,6 +1283,7 @@ export default function Home() {
       await set(profileRef, {
         ...existingProfile,
         username: usernameInput.trim(),
+        defaultDailyRestLimit: existingProfile.defaultDailyRestLimit || defaultDailyRestLimit || 20,
       });
       setCustomUsername(usernameInput.trim());
       setShowUsernameModal(false);
@@ -1024,7 +1322,11 @@ export default function Home() {
   };
 
   const saveRecordApi = async (record: DayRecord) => {
-    const updatedRecord = calculateRecordHours(record);
+    const recordToCalculate: DayRecord = {
+      ...record,
+      allowedRestLimit: record.allowedRestLimit !== undefined ? record.allowedRestLimit : defaultDailyRestLimit,
+    };
+    const updatedRecord = calculateRecordHours(recordToCalculate, undefined, defaultDailyRestLimit);
     if (user) {
       try {
         const recordRef = ref(db, `records/${user.uid}/${updatedRecord.date}`);
@@ -1311,6 +1613,7 @@ export default function Home() {
 
       const existingRecord = records.find((r) => r.date === modalDate);
       record.activeRestStart = existingRecord ? existingRecord.activeRestStart : null;
+      record.allowedRestLimit = existingRecord?.allowedRestLimit !== undefined ? existingRecord.allowedRestLimit : defaultDailyRestLimit;
 
       if (modalRestSessions.length > 0) {
         record.restSessions = modalRestSessions;
@@ -1628,19 +1931,60 @@ export default function Home() {
               <div className={styles.restProgressContainer}>
                 <div className={styles.restText}>
                   <span>Rest Time: <strong>{liveRestMins > 0 ? formatHoursToText(liveRestMins / 60) : '0h 00m'}</strong></span>
-                  <span>Limit: 20 mins</span>
+                  <div className={styles.restLimitControls}>
+                    <span>Limit: <strong>{allowedRestLimit}m</strong></span>
+                    <button
+                      type="button"
+                      className={styles.limitAdjustBtn}
+                      onClick={() => handleAdjustRestLimit(-5)}
+                      title="Decrease limit by 5 min"
+                    >
+                      -
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.limitAdjustBtn}
+                      onClick={() => handleAdjustRestLimit(5)}
+                      title="Increase limit by 5 min"
+                    >
+                      +
+                    </button>
+                  </div>
                 </div>
                 <div className={styles.restBarWrapper}>
                   <div
-                    className={`${styles.restBarFill} ${liveRestMins > 20 ? styles.restLimitExceeded : styles.restLimitOk}`}
-                    style={{ width: `${Math.min(100, (liveRestMins / 20) * 100)}%` }}
+                    className={`${styles.restBarFill} ${liveRestMins > allowedRestLimit ? styles.restLimitExceeded : styles.restLimitOk}`}
+                    style={{ width: `${Math.min(100, (liveRestMins / allowedRestLimit) * 100)}%` }}
                   />
                 </div>
-                {liveRestMins > 20 && (
+                {liveRestMins > allowedRestLimit && (
                   <span className={styles.restText} style={{ color: 'var(--color-absent)', fontWeight: 'bold' }}>
-                    ⚠️ Excess Rest (+{Math.round(liveRestMins - 20)}m) is deducted from work hours!
+                    ⚠️ Excess Rest (+{Math.round(liveRestMins - allowedRestLimit)}m) is deducted from work hours!
                   </span>
                 )}
+              </div>
+            )}
+
+            {/* When not clocked in, show configurable daily break limit */}
+            {(!todayRecord || todayRecord.status !== 'present') && (
+              <div className={styles.restLimitControls} style={{ justifyContent: 'center', marginBottom: '1.25rem', marginTop: '0.25rem' }}>
+                <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Daily Break Limit: <strong style={{ color: 'var(--text-primary)' }}>{defaultDailyRestLimit}m</strong></span>
+                <button
+                  type="button"
+                  className={styles.limitAdjustBtn}
+                  onClick={() => handleAdjustRestLimit(-5)}
+                  title="Decrease daily break limit by 5 min"
+                >
+                  -
+                </button>
+                <button
+                  type="button"
+                  className={styles.limitAdjustBtn}
+                  onClick={() => handleAdjustRestLimit(5)}
+                  title="Increase daily break limit by 5 min"
+                >
+                  +
+                </button>
               </div>
             )}
 
@@ -1840,7 +2184,7 @@ export default function Home() {
               <div className={styles.statValue} style={{ color: 'var(--color-present)' }}>
                 {formatHoursToText(displayStats.hoursWorkedTotal)}
               </div>
-              <div className={styles.statSubtext}>Actual time (rest exceeding 20m deducted)</div>
+              <div className={styles.statSubtext}>Actual time (rest exceeding {allowedRestLimit}m deducted)</div>
             </div>
 
             <div className={`${styles.glass} ${styles.statCard} ${displayStats.pendingHoursTotal > 0 ? styles.statCardPendingPositive : styles.statCardPendingNegative}`}>
@@ -2031,7 +2375,13 @@ export default function Home() {
                           )}
                         </td>
                         <td style={{ fontWeight: 'bold', color: record.status === 'present' ? 'var(--color-present)' : 'inherit' }}>
-                          {record.status === 'present' ? formatHoursToText(record.workedHours) : '--'}
+                          {record.status === 'present'
+                            ? formatHoursToText(
+                                record.date === todayStr && !record.outTime
+                                  ? liveWorkedHoursDecimal
+                                  : record.workedHours
+                              )
+                            : '--'}
                         </td>
                         <td>
                           <div className={styles.actionCell}>
@@ -2731,6 +3081,39 @@ export default function Home() {
                 />
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Active Break Float Popup (Bottom Right) - Hidden when native desktop PiP is open */}
+      {todayRecord && todayRecord.status === 'present' && todayRecord.activeRestStart && !isPipOpen && (
+        <div className={styles.activeBreakPopup}>
+          <div className={styles.activeBreakPopupHeader}>
+            <span className={styles.activeBreakPopupPulse}></span>
+            <strong>☕ Break in Progress</strong>
+          </div>
+          <div className={styles.activeBreakPopupTimer}>
+            ⏱️ {formatMsToHMS(liveActiveBreakMs)}
+          </div>
+          <p className={styles.activeBreakPopupText}>Don&apos;t forget to resume work when finished!</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', width: '100%' }}>
+            <button
+              type="button"
+              className={styles.activeBreakPopupBtn}
+              onClick={handleEndRest}
+            >
+              ⏸️ Resume Work
+            </button>
+            {typeof window !== 'undefined' && 'documentPictureInPicture' in window && (
+              <button
+                type="button"
+                className={styles.activeBreakPopupSecondaryBtn}
+                onClick={openDesktopPipWidget}
+                title="Pop out this timer into an always-on-top desktop window visible even when browser is minimized"
+              >
+                📌 Pop Out to Desktop (Always on Top)
+              </button>
+            )}
           </div>
         </div>
       )}
