@@ -3,55 +3,35 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import styles from './page.module.css';
-import { auth, db, googleProvider, remoteConfig } from '@/lib/firebase';
+import { auth, db, googleProvider, remoteConfig, logAnalyticsEvent } from '@/lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { ref, onValue, set, get } from 'firebase/database';
 import { fetchAndActivate, getValue, onConfigUpdate, activate } from 'firebase/remote-config';
 import { RecordSession, DayRecord, DashboardStats, calculateRecordHours, Holiday } from '@/lib/calculations';
-
-import AdsterraAd from './components/AdsterraAd';
-import AdsterraNative from './components/AdsterraNative';
 
 const ADMIN_EMAIL = 'woxxinsolution12@gmail.com';
 
 const detectAdBlocker = async (): Promise<boolean> => {
   if (typeof window === 'undefined' || typeof document === 'undefined') return false;
 
-  // Test 1: Fetch common ad script domains
   try {
-    await fetch('https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js', {
-      method: 'HEAD',
-      mode: 'no-cors',
-      cache: 'no-store'
-    });
-  } catch (error) {
-    return true; // Blocked by network rule
+    const testAd = document.createElement('div');
+    testAd.className = 'adsbox ad-placement doubleclick-ad ad-placeholder pub_300x250 pub_300x250m pub_728x90 text-ad textAd text_ad text_ads text-ads text-ad-links';
+    testAd.style.position = 'absolute';
+    testAd.style.left = '-9999px';
+    testAd.style.top = '-9999px';
+    testAd.style.width = '10px';
+    testAd.style.height = '10px';
+    document.body.appendChild(testAd);
+
+    const isHidden = window.getComputedStyle(testAd).display === 'none' ||
+      window.getComputedStyle(testAd).visibility === 'hidden';
+    document.body.removeChild(testAd);
+
+    return isHidden;
+  } catch (e) {
+    return false;
   }
-
-  try {
-    await fetch('https://www.highperformanceformat.com/6a7a21c6c4c2d5aa3daf05beeba9c75f/invoke.js', {
-      method: 'HEAD',
-      mode: 'no-cors',
-      cache: 'no-store'
-    });
-  } catch (error) {
-    return true; // Blocked by network rule
-  }
-
-  // Test 2: Check hidden DOM element height (some blockers use cosmetic filter hiding)
-  const testAd = document.createElement('div');
-  testAd.className = 'adsbox ad-placement doubleclick-ad ad-placeholder';
-  testAd.style.position = 'absolute';
-  testAd.style.left = '-9999px';
-  testAd.style.top = '-9999px';
-  testAd.style.width = '1px';
-  testAd.style.height = '1px';
-  document.body.appendChild(testAd);
-
-  const isHidden = window.getComputedStyle(testAd).display === 'none' || testAd.offsetHeight === 0;
-  document.body.removeChild(testAd);
-
-  return isHidden;
 };
 
 export default function Home() {
@@ -178,8 +158,9 @@ export default function Home() {
   const todayRecord = records.find((r) => r.date === todayStr);
   const modalRecord = records.find((r) => r.date === modalDate);
 
-  // Load saved default rest limit from localStorage on mount
+  // Load saved default rest limit from localStorage on mount & log analytics page_view
   useEffect(() => {
+    logAnalyticsEvent('page_view', { page_title: 'Office Time Tracker' });
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('office_timer_default_rest_limit');
       if (saved) {
@@ -479,21 +460,10 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [showAds, isAdBlockActive, adRefreshTime]);
 
-  // SocialBar Script Effect — only inject when ads are enabled and no adblocker is active
-  useEffect(() => {
-    if (!showAds || isAdBlockActive) return;
-    // Inject SocialBar overlay script safely
-    const socialBarScript = document.createElement('script');
-    socialBarScript.src = 'https://pl30780812.effectivecpmnetwork.com/4a/06/b0/4a06b011b3a6976348b4f34ff393dfb0.js';
-    socialBarScript.async = true;
-    document.body.appendChild(socialBarScript);
-
-    return () => {
-      if (document.body.contains(socialBarScript)) {
-        document.body.removeChild(socialBarScript);
-      }
-    };
-  }, [showAds, isAdBlockActive]);
+  // Popunder Ad Trigger — triggers only on specific user action events
+  const triggerPopunder = () => {
+    // Scripts are loaded at root layout level for consistent delivery
+  };
   // Break Running Background Notification — fires when tab is hidden or minimized while break is active
   useEffect(() => {
     const isBreakActive = !!(todayRecord?.status === 'present' && todayRecord?.activeRestStart);
@@ -845,6 +815,8 @@ export default function Home() {
 
   // Clock Actions
   const handleClockIn = async () => {
+    triggerPopunder();
+    logAnalyticsEvent('clock_in');
     const now = new Date();
     // Enforce minimum In time: 8:00 AM
     if (now.getHours() < 8) {
@@ -973,6 +945,7 @@ export default function Home() {
   };
 
   const handleStartRest = async () => {
+    logAnalyticsEvent('break_start');
     // Explicitly request notification permission during click gesture
     if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
       try {
@@ -997,6 +970,8 @@ export default function Home() {
   };
 
   const handleEndRest = async () => {
+    triggerPopunder();
+    logAnalyticsEvent('break_end');
     if (pipWindowRef.current && !pipWindowRef.current.closed) {
       try {
         pipWindowRef.current.close();
@@ -1082,6 +1057,8 @@ export default function Home() {
   };
 
   const handleClockOut = async () => {
+    triggerPopunder();
+    logAnalyticsEvent('clock_out');
     if (pipWindowRef.current && !pipWindowRef.current.closed) {
       try {
         pipWindowRef.current.close();
@@ -1120,6 +1097,7 @@ export default function Home() {
 
   // Manual Break Handler - adds a break session to today's record
   const handleSaveManualBreak = async () => {
+    triggerPopunder();
     if (!manualBreakStart || !manualBreakEnd) {
       alert('Please specify both start and end times for the break!');
       return;
@@ -1199,6 +1177,7 @@ export default function Home() {
 
   // Manual Start Tracker Handler - creates a present record with a custom in-time
   const handleManualStart = async () => {
+    triggerPopunder();
     if (!manualInPunch) {
       alert('Please specify an In-Punch time!');
       return;
@@ -1236,6 +1215,7 @@ export default function Home() {
   };
 
   const handleMarkAbsentToday = async () => {
+    triggerPopunder();
     const dateStr = getTodayDateString();
     const newRecord: DayRecord = {
       date: dateStr,
@@ -1268,6 +1248,7 @@ export default function Home() {
   const handleSignIn = async () => {
     try {
       await signInWithPopup(auth, googleProvider);
+      logAnalyticsEvent('login', { method: 'Google' });
     } catch (error) {
       console.error('Error signing in with Google:', error);
     }
@@ -1458,6 +1439,7 @@ export default function Home() {
   };
 
   const handleAddModalBreak = () => {
+    triggerPopunder();
     if (!newBreakStart || !newBreakEnd) {
       alert("Please specify both start and end times for the break!");
       return;
@@ -1547,6 +1529,7 @@ export default function Home() {
   // Save Modal Data
   const handleSaveModal = async (e: React.FormEvent) => {
     e.preventDefault();
+    triggerPopunder();
 
     // Validation: No future dates allowed
     const today = new Date();
@@ -1992,11 +1975,11 @@ export default function Home() {
               {/* Not clocked in yet */}
               {(!todayRecord || (todayRecord.status !== 'present' && todayRecord.status !== 'absent' && todayRecord.status !== 'weekly-off')) && (
                 <>
-                  <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleClockIn}>
+                  <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleClockIn} data-popunder-action="true">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg>
                     Clock In
                   </button>
-                  <button className={`${styles.btn} ${styles.btnSecondary}`} onClick={handleMarkAbsentToday}>
+                  <button className={`${styles.btn} ${styles.btnSecondary}`} onClick={handleMarkAbsentToday} data-popunder-action="true">
                     Mark Absent
                   </button>
                 </>
@@ -2011,13 +1994,13 @@ export default function Home() {
                       Start Break (Shortcut: R)
                     </button>
                   ) : (
-                    <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleEndRest}>
+                    <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleEndRest} data-popunder-action="true">
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><path d="m10 15 5-3-5-3v6z"/></svg>
                       Resume Work (Shortcut: R)
                     </button>
                   )}
                   
-                  <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleClockOut}>
+                  <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleClockOut} data-popunder-action="true">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
                     Leave Today
                   </button>
@@ -2031,7 +2014,7 @@ export default function Home() {
                     Today&apos;s shift is locked. You can manually edit it in the logs or resume working.
                   </div>
                   {todayRecord.status === 'present' && todayRecord.outTime && (
-                    <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleResumeShift} style={{ width: '100%' }}>
+                    <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleResumeShift} style={{ width: '100%' }} data-popunder-action="true">
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
                       Resume Work
                     </button>
@@ -2403,30 +2386,6 @@ export default function Home() {
         </main>
       )}
 
-          {/* Ads gated by Firebase Remote Config appConfig (1=show, 0=hide) */}
-          {showAds && (
-            <>
-              {/* Fixed Left Skyscraper Ad - floats in empty left margin */}
-              <div className={styles.leftSkyscraperAd}>
-                <AdsterraAd adKey="064c214ea344658e1d47e2c270be19cb" width={160} height={600} refreshTrigger={refreshTrigger} />
-              </div>
-
-              {/* Fixed Right Skyscraper Ads - float in empty right margin */}
-              <div className={styles.rightSkyscraperAd}>
-                <div className={styles.wideAdOnly}>
-                  <AdsterraAd adKey="b9ceb5cb1cf79ff98c0eab7d5017bae3" width={300} height={250} refreshTrigger={refreshTrigger} />
-                </div>
-                <AdsterraAd adKey="6a7a21c6c4c2d5aa3daf05beeba9c75f" width={160} height={300} refreshTrigger={refreshTrigger} />
-                <a href="https://www.effectivecpmnetwork.com/dg4gpu8v14?key=9c30efa5f6914e88e10a6663ecc5bad9" target="_blank" rel="noopener noreferrer" className={styles.smartLinkAd}>
-                  🔥 Special Offer: Get Rewards Now!
-                </a>
-              </div>
-
-              {/* Native Banner Ad - rendered at the bottom of the page content */}
-              <AdsterraNative refreshTrigger={refreshTrigger} />
-            </>
-          )}
-
       {/* Manual Entry / Edit Modal */}
       {showModal && (
         <div className={styles.modalOverlay} onClick={() => setShowModal(false)}>
@@ -2541,6 +2500,7 @@ export default function Home() {
                         type="button"
                         className={`${styles.btn} ${styles.btnSecondary} ${styles.btnAddBreak}`}
                         onClick={handleAddModalBreak}
+                        data-popunder-action="true"
                       >
                         + Add Break
                       </button>
@@ -2574,7 +2534,7 @@ export default function Home() {
                 >
                   Cancel
                 </button>
-                <button type="submit" className={`${styles.btn} ${styles.btnPrimary}`}>
+                <button type="submit" className={`${styles.btn} ${styles.btnPrimary}`} data-popunder-action="true">
                   Save Record
                 </button>
               </div>
@@ -2782,6 +2742,7 @@ export default function Home() {
                   type="button"
                   className={`${styles.btn} ${styles.btnPrimary}`}
                   onClick={handleSaveManualBreak}
+                  data-popunder-action="true"
                 >
                   Save Break
                 </button>
@@ -2824,6 +2785,7 @@ export default function Home() {
                   type="button"
                   className={`${styles.btn} ${styles.btnPrimary}`}
                   onClick={handleManualStart}
+                  data-popunder-action="true"
                 >
                   Start Tracking
                 </button>
@@ -2979,15 +2941,6 @@ export default function Home() {
               ) : (
                 <div className={styles.browserFrame} style={{ overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'stretch', justifyContent: 'flex-start', textAlign: 'left' }}>
                   <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Search results for: <strong>{browserSearchQuery}</strong></div>
-                  
-                  {/* SmartLink Ad Item */}
-                  <div style={{ border: '1px solid rgba(245, 158, 11, 0.3)', background: 'rgba(245, 158, 11, 0.03)', padding: '0.75rem', borderRadius: '8px' }}>
-                    <span style={{ fontSize: '0.65rem', color: '#fbbf24', border: '1px solid #fbbf24', padding: '1px 4px', borderRadius: '3px', marginRight: '5px', fontWeight: 700 }}>AD</span>
-                    <a href="https://www.effectivecpmnetwork.com/dg4gpu8v14?key=9c30efa5f6914e88e10a6663ecc5bad9" target="_blank" rel="noopener noreferrer" style={{ fontSize: '0.9rem', color: '#60a5fa', fontWeight: 700, textDecoration: 'underline' }}>
-                      Claim Your Special Gift & Rewards Instantly
-                    </a>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>Complete simple steps and redeem points for cash, gifts, and exclusive rewards. No deposit required.</div>
-                  </div>
 
                   {/* Organic Search Result 1 */}
                   <div>
@@ -3101,6 +3054,7 @@ export default function Home() {
               type="button"
               className={styles.activeBreakPopupBtn}
               onClick={handleEndRest}
+              data-popunder-action="true"
             >
               ⏸️ Resume Work
             </button>

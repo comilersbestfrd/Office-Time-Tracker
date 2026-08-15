@@ -2,6 +2,7 @@ import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
 import { getDatabase } from "firebase/database";
 import { getRemoteConfig } from "firebase/remote-config";
+import { getAnalytics, isSupported, Analytics, logEvent } from "firebase/analytics";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDvH-PXfYjuUFk1HH91tgruIfHFsL6cmSA",
@@ -34,6 +35,28 @@ export const isAdmin = async (_uid: string, email: string | null): Promise<boole
 export const auth = getAuth(app);
 export const db = getDatabase(app);
 export const googleProvider = new GoogleAuthProvider();
+
+// Initialize Firebase Analytics (Client-side only)
+export let analytics: Analytics | null = null;
+if (typeof window !== "undefined") {
+  isSupported().then((supported) => {
+    if (supported) {
+      analytics = getAnalytics(app);
+    }
+  }).catch((err) => {
+    console.warn("Firebase Analytics is not supported in this environment:", err);
+  });
+}
+
+export const logAnalyticsEvent = (eventName: string, eventParams?: Record<string, any>) => {
+  if (typeof window !== 'undefined' && analytics) {
+    try {
+      logEvent(analytics, eventName, eventParams);
+    } catch (e) {
+      console.warn('Analytics event logging failed:', e);
+    }
+  }
+};
 
 // Initialize Remote Config
 export const remoteConfig = getRemoteConfig(app);
