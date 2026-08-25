@@ -491,7 +491,8 @@ export default function AdminDashboard() {
                       <th>Status</th>
                       <th>In Time</th>
                       <th>Out Time</th>
-                      <th>Rest (min)</th>
+                      <th>Early (min)</th>
+                      <th>Break (min)</th>
                       <th>Lunch (min)</th>
                       <th>Worked (hh:mm)</th>
                       <th>Pending (hh:mm)</th>
@@ -517,7 +518,8 @@ export default function AdminDashboard() {
                         </td>
                         <td>{formatTime(rec.inTime)}</td>
                         <td>{formatTime(rec.outTime)}</td>
-                        <td>{rec.restTimeTotal ? Math.round(rec.restTimeTotal) : 0}</td>
+                        <td>{rec.status === 'present' && rec.earlyTime && rec.earlyTime > 0 ? Math.round(rec.earlyTime) : '--'}</td>
+                        <td>{rec.status === 'present' && rec.restTimeTotal ? Math.round(rec.restTimeTotal) : (rec.status === 'present' ? 0 : '--')}</td>
                         <td>{rec.lunchDeduction ? Math.round(rec.lunchDeduction) : '--'}</td>
                         <td className={styles.hoursCell}>
                           {formatHoursToHHMM(rec.workedHours)}

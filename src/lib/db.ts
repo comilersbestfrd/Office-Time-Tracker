@@ -129,6 +129,7 @@ export async function getStats(nowStr?: string): Promise<DashboardStats> {
   let absentDays = 0;
   let weeklyOffDays = 0;
   let hoursWorkedTotal = 0;
+  let pendingHoursTotal = 0;
 
   for (const record of records) {
     // If the record is currently active, compute temporary values for stats
@@ -139,12 +140,14 @@ export async function getStats(nowStr?: string): Promise<DashboardStats> {
       presentDays++;
       if (!isHoliday) {
         totalWorkDays++; // Expected to work only if not a holiday
+        pendingHoursTotal += (evaluated.pendingHours !== undefined ? evaluated.pendingHours : 0);
       }
       hoursWorkedTotal += evaluated.workedHours;
     } else if (evaluated.status === 'absent') {
       absentDays++;
       if (!isHoliday) {
         totalWorkDays++; // Expected to work only if not a holiday
+        pendingHoursTotal += 8;
       }
     } else if (evaluated.status === 'weekly-off') {
       weeklyOffDays++;
@@ -162,7 +165,6 @@ export async function getStats(nowStr?: string): Promise<DashboardStats> {
   }
 
   const requiredHoursTotal = totalWorkDays * 8;
-  const pendingHoursTotal = Math.max(0, requiredHoursTotal - hoursWorkedTotal);
 
   return {
     totalWorkDays,
@@ -171,7 +173,7 @@ export async function getStats(nowStr?: string): Promise<DashboardStats> {
     weeklyOffDays,
     requiredHoursTotal: parseFloat(requiredHoursTotal.toFixed(2)),
     hoursWorkedTotal: parseFloat(hoursWorkedTotal.toFixed(2)),
-    pendingHoursTotal: parseFloat((requiredHoursTotal - hoursWorkedTotal).toFixed(2)),
+    pendingHoursTotal: parseFloat(pendingHoursTotal.toFixed(2)),
   };
 }
 

@@ -13,6 +13,7 @@ export interface DayRecord {
   activeRestStart: string | null; // ISO string if currently resting
   workedHours: number; // calculated hours
   pendingHours: number; // calculated pending hours
+  earlyTime?: number; // in minutes (punched in before 09:00 AM)
   lunchDeduction?: number; // in minutes
   notes?: string;
   isAutoClockedOut?: boolean;
@@ -39,6 +40,7 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
   if (record.status !== 'present') {
     return {
       ...record,
+      earlyTime: 0,
       workedHours: 0,
       pendingHours: 0, // Weekly off and Absent don't accumulate worked hours on the day itself
     };
@@ -47,6 +49,7 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
   if (!record.inTime) {
     return {
       ...record,
+      earlyTime: 0,
       workedHours: 0,
       pendingHours: 8,
     };
@@ -72,17 +75,31 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
     isAutoClockedOut = true;
   }
 
-  // Total elapsed time in milliseconds
-  const elapsedMs = outTime.getTime() - inTime.getTime();
-  if (elapsedMs < 0) {
-    return { ...record, workedHours: 0, pendingHours: 8 };
+  const nineAm = new Date(`${record.date}T09:00:00`);
+
+  // Calculate Early Time before 9:00 AM (in minutes)
+  let earlyMinutes = 0;
+  if (inTime.getTime() < nineAm.getTime()) {
+    const earlyEnd = Math.min(outTime.getTime(), nineAm.getTime());
+    if (earlyEnd > inTime.getTime()) {
+      earlyMinutes = (earlyEnd - inTime.getTime()) / 60000;
+    }
+  }
+
+  // Work time always starts from 09:00 AM if inTime is earlier
+  const effectiveStartTime = inTime.getTime() < nineAm.getTime() ? nineAm : inTime;
+
+  // Elapsed work time in milliseconds (only counts time after 9 AM to out punch)
+  let elapsedMs = 0;
+  if (outTime.getTime() > effectiveStartTime.getTime()) {
+    elapsedMs = outTime.getTime() - effectiveStartTime.getTime();
   }
 
   // Calculate Lunch Break (1:00 PM to 2:00 PM) overlap
   const lunchStart = new Date(`${record.date}T13:00:00`);
   const lunchEnd = new Date(`${record.date}T14:00:00`);
 
-  const overlapStart = new Date(Math.max(inTime.getTime(), lunchStart.getTime()));
+  const overlapStart = new Date(Math.max(effectiveStartTime.getTime(), lunchStart.getTime()));
   const overlapEnd = new Date(Math.min(outTime.getTime(), lunchEnd.getTime()));
 
   let lunchOverlapMs = 0;
@@ -91,11 +108,8 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
   }
   const lunchDeductionMinutes = lunchOverlapMs / 60000;
 
-  // Subtract lunch break from total elapsed time
-  const netElapsedMs = Math.max(0, elapsedMs - lunchOverlapMs);
-
-  // Calculate total rest time including active rest session
-  let totalRestMinutes = record.restTimeTotal;
+  // Calculate total rest / break time including active rest session
+  let totalRestMinutes = record.restTimeTotal || 0;
   if (record.activeRestStart) {
     const restStart = new Date(record.activeRestStart);
     const restEnd = record.outTime ? new Date(record.outTime) : new Date(nowStr || new Date().toISOString());
@@ -105,21 +119,16 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
     }
   }
 
-  // Allowed rest limit. Deduct excess break time from actual worked hours.
-  const allowedRest = record.allowedRestLimit !== undefined ? record.allowedRestLimit : defaultAllowedRest;
-  const excessRestMinutes = Math.max(0, totalRestMinutes - allowedRest);
-
-  // Worked hours = (net elapsed time - excess rest time)
-  const elapsedHours = netElapsedMs / (1000 * 60 * 60);
-  const excessRestHours = excessRestMinutes / 60;
-  
-  const workedHours = Math.max(0, elapsedHours - excessRestHours);
+  // Work time = (elapsed work time after 9:00 AM - lunch break). Break time is counted as worked time.
+  const netWorkedMs = Math.max(0, elapsedMs - lunchOverlapMs);
+  const workedHours = netWorkedMs / (1000 * 60 * 60);
   const pendingHours = 8 - workedHours;
 
   return {
     ...record,
     outTime: outTimeStr,
     isAutoClockedOut,
+    earlyTime: parseFloat(earlyMinutes.toFixed(2)),
     lunchDeduction: parseFloat(lunchDeductionMinutes.toFixed(2)),
     workedHours: parseFloat(workedHours.toFixed(2)),
     pendingHours: parseFloat(pendingHours.toFixed(2)),

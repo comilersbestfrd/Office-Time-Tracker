@@ -702,11 +702,18 @@ export default function Home() {
         totalRestMs += now.getTime() - restStart.getTime();
       }
 
+      // Work time always starts from 09:00 AM
+      const nineAm = new Date(`${todayRecord.date}T09:00:00`);
+      const effectiveStartTime = inTime.getTime() < nineAm.getTime() ? nineAm : inTime;
+
+      // Elapsed work time (only after 9:00 AM to now)
+      const elapsedMs = Math.max(0, now.getTime() - effectiveStartTime.getTime());
+
       // Calculate Lunch Break (1:00 PM to 2:00 PM) overlap
       const lunchStart = new Date(`${todayRecord.date}T13:00:00`);
       const lunchEnd = new Date(`${todayRecord.date}T14:00:00`);
 
-      const overlapStart = new Date(Math.max(inTime.getTime(), lunchStart.getTime()));
+      const overlapStart = new Date(Math.max(effectiveStartTime.getTime(), lunchStart.getTime()));
       const overlapEnd = new Date(Math.min(now.getTime(), lunchEnd.getTime()));
 
       let lunchOverlapMs = 0;
@@ -714,12 +721,8 @@ export default function Home() {
         lunchOverlapMs = overlapEnd.getTime() - overlapStart.getTime();
       }
 
-      // Calculate Worked Time using dynamic or default limit
-      const currentRestLimit = todayRecord.allowedRestLimit !== undefined ? todayRecord.allowedRestLimit : 20;
-      const elapsedMs = now.getTime() - inTime.getTime();
-      const allowedRestMs = currentRestLimit * 60 * 1000;
-      const excessRestMs = Math.max(0, totalRestMs - allowedRestMs);
-      const workedMs = Math.max(0, elapsedMs - lunchOverlapMs - excessRestMs);
+      // Work time: elapsed time after 9 AM minus lunch break (break time is counted in worked time)
+      const workedMs = Math.max(0, elapsedMs - lunchOverlapMs);
 
       // Calculate running active break timer
       let activeBreakMs = 0;
@@ -1712,6 +1715,7 @@ export default function Home() {
     let absentDays = 0;
     let weeklyOffDays = 0;
     let hoursWorkedTotal = 0;
+    let pendingHoursTotal = 0;
 
     filteredRecords.forEach((record) => {
       const isToday = record.date === todayStr;
@@ -1726,12 +1730,19 @@ export default function Home() {
         presentDays++;
         if (!isHoliday) {
           totalWorkDays++;
+          if (isToday && !record.outTime) {
+            const effectiveHours = liveWorkedHoursDecimal + (liveRestMins / 60);
+            pendingHoursTotal += (8 - effectiveHours);
+          } else {
+            pendingHoursTotal += (record.pendingHours !== undefined ? record.pendingHours : (8 - (worked + (record.restTimeTotal || 0) / 60)));
+          }
         }
         hoursWorkedTotal += worked;
       } else if (record.status === 'absent') {
         absentDays++;
         if (!isHoliday) {
           totalWorkDays++;
+          pendingHoursTotal += 8;
         }
       } else if (record.status === 'weekly-off') {
         weeklyOffDays++;
@@ -1746,7 +1757,6 @@ export default function Home() {
     });
 
     const requiredHoursTotal = totalWorkDays * 8;
-    const pendingHoursTotal = requiredHoursTotal - hoursWorkedTotal;
 
     return {
       totalWorkDays,
@@ -1755,7 +1765,7 @@ export default function Home() {
       weeklyOffDays,
       requiredHoursTotal: parseFloat(requiredHoursTotal.toFixed(2)),
       hoursWorkedTotal: parseFloat(hoursWorkedTotal.toFixed(2)),
-      pendingHoursTotal: parseFloat((requiredHoursTotal - hoursWorkedTotal).toFixed(2)),
+      pendingHoursTotal: parseFloat(pendingHoursTotal.toFixed(2)),
     };
   };
 
@@ -1806,10 +1816,12 @@ export default function Home() {
               </span>
             </div>
           )}
-          <button className={styles.btnReset} onClick={handleClearAllData}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2M10 11v6M14 11v6"/></svg>
-            Clear Data
-          </button>
+          {user && (
+            <button className={styles.btnReset} onClick={handleClearAllData}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2M10 11v6M14 11v6"/></svg>
+              Clear Data
+            </button>
+          )}
         </div>
       </header>
 
@@ -1904,16 +1916,27 @@ export default function Home() {
             </div>
 
             <div className={styles.timerSub}>
-              {todayRecord && todayRecord.status === 'present'
-                ? `Clocked In: ${formatISOToTime(todayRecord.inTime)}`
-                : 'Clock in to start tracking worked hours'}
+              {todayRecord && todayRecord.status === 'present' ? (
+                <span>
+                  Clocked In: <strong>{formatISOToTime(todayRecord.inTime)}</strong>
+                  {' · '}
+                  Break Time: <strong>{liveRestMins > 0 ? `${Math.round(liveRestMins)}m` : '0m'}</strong>
+                  {todayRecord.activeRestStart && (
+                    <span style={{ color: 'var(--color-warning)', marginLeft: '0.35rem' }}>
+                      (☕ Running: {formatMsToHMS(liveActiveBreakMs)})
+                    </span>
+                  )}
+                </span>
+              ) : (
+                'Clock in to start tracking worked hours'
+              )}
             </div>
 
             {/* Rest Limit Progress Bar */}
             {todayRecord && todayRecord.status === 'present' && (
               <div className={styles.restProgressContainer}>
                 <div className={styles.restText}>
-                  <span>Rest Time: <strong>{liveRestMins > 0 ? formatHoursToText(liveRestMins / 60) : '0h 00m'}</strong></span>
+                  <span>Break Time: <strong>{liveRestMins > 0 ? formatHoursToText(liveRestMins / 60) : '0h 00m'}</strong></span>
                   <div className={styles.restLimitControls}>
                     <span>Limit: <strong>{allowedRestLimit}m</strong></span>
                     <button
@@ -1940,11 +1963,6 @@ export default function Home() {
                     style={{ width: `${Math.min(100, (liveRestMins / allowedRestLimit) * 100)}%` }}
                   />
                 </div>
-                {liveRestMins > allowedRestLimit && (
-                  <span className={styles.restText} style={{ color: 'var(--color-absent)', fontWeight: 'bold' }}>
-                    ⚠️ Excess Rest (+{Math.round(liveRestMins - allowedRestLimit)}m) is deducted from work hours!
-                  </span>
-                )}
               </div>
             )}
 
@@ -2056,8 +2074,10 @@ export default function Home() {
                   <div className={styles.quickStatVal}>{formatISOToTime(todayRecord.inTime)}</div>
                 </div>
                 <div className={styles.quickStat}>
-                  <div className={styles.quickStatLabel}>Check-Out</div>
-                  <div className={styles.quickStatVal}>{formatISOToTime(todayRecord.outTime)}</div>
+                  <div className={styles.quickStatLabel}>Break Time</div>
+                  <div className={styles.quickStatVal}>
+                    {liveRestMins > 0 ? `${Math.round(liveRestMins)}m` : '0m'}
+                  </div>
                 </div>
                 <div className={styles.quickStat}>
                   <div className={styles.quickStatLabel}>Worked Time</div>
@@ -2065,6 +2085,14 @@ export default function Home() {
                     {todayRecord.outTime 
                       ? formatHoursToText(todayRecord.workedHours)
                       : formatHoursToText(liveWorkedHoursDecimal)}
+                  </div>
+                </div>
+                <div className={styles.quickStat}>
+                  <div className={styles.quickStatLabel}>Pending</div>
+                  <div className={styles.quickStatVal} style={{ color: (todayRecord.outTime ? todayRecord.pendingHours : (8 - liveWorkedHoursDecimal)) <= 0 ? 'var(--color-present)' : 'var(--color-absent)' }}>
+                    {todayRecord.outTime
+                      ? (todayRecord.pendingHours <= 0 ? '0h 0m' : formatHoursToText(todayRecord.pendingHours))
+                      : ((8 - liveWorkedHoursDecimal) <= 0 ? '0h 0m' : formatHoursToText(8 - liveWorkedHoursDecimal))}
                   </div>
                 </div>
               </div>
@@ -2167,22 +2195,24 @@ export default function Home() {
               <div className={styles.statValue} style={{ color: 'var(--color-present)' }}>
                 {formatHoursToText(displayStats.hoursWorkedTotal)}
               </div>
-              <div className={styles.statSubtext}>Actual time (rest exceeding {allowedRestLimit}m deducted)</div>
+              <div className={styles.statSubtext}>Pure work time (breaks excluded)</div>
             </div>
 
             <div className={`${styles.glass} ${styles.statCard} ${displayStats.pendingHoursTotal > 0 ? styles.statCardPendingPositive : styles.statCardPendingNegative}`}>
               <div className={styles.statCardHeader}>
-                <span>{displayStats.pendingHoursTotal >= 0 ? 'Pending Hours' : 'Overtime Hours'}</span>
+                <span>{displayStats.pendingHoursTotal > 0 ? 'Pending Hours' : 'Overtime Hours'}</span>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               </div>
               <div 
                 className={styles.statValue} 
-                style={{ color: displayStats.pendingHoursTotal >= 0 ? 'var(--color-absent)' : 'var(--color-present)' }}
+                style={{ color: displayStats.pendingHoursTotal > 0 ? 'var(--color-absent)' : 'var(--color-present)' }}
               >
-                {formatExtraHoursSign(displayStats.hoursWorkedTotal - displayStats.requiredHoursTotal)}
+                {displayStats.pendingHoursTotal > 0
+                  ? formatHoursToText(displayStats.pendingHoursTotal)
+                  : `+${formatHoursToText(Math.abs(displayStats.pendingHoursTotal))}`}
               </div>
               <div className={styles.statSubtext}>
-                {displayStats.pendingHoursTotal >= 0 ? 'Hours remaining to meet quota' : 'Extra hours accumulated'}
+                {displayStats.pendingHoursTotal > 0 ? 'Hours remaining (break time credited)' : 'Extra hours accumulated'}
               </div>
             </div>
           </div>
@@ -2239,9 +2269,11 @@ export default function Home() {
                     if (record) {
                       if (record.status === 'present') {
                         statusClass = styles.dayPresent;
-                        label = formatHoursToText(record.workedHours);
-                        if (record.restTimeTotal > 0) {
-                          restLabel = `Rest: ${Math.round(record.restTimeTotal)}m`;
+                        const dayWorkedHours = (isToday && !record.outTime) ? liveWorkedHoursDecimal : record.workedHours;
+                        const dayRestMins = (isToday && record.activeRestStart) ? liveRestMins : record.restTimeTotal;
+                        label = formatHoursToText(dayWorkedHours);
+                        if (dayRestMins > 0) {
+                          restLabel = `Break: ${Math.round(dayRestMins)}m`;
                         }
                       } else if (record.status === 'absent') {
                         statusClass = styles.dayAbsent;
@@ -2311,8 +2343,9 @@ export default function Home() {
                     <th>Status</th>
                     <th>In Time</th>
                     <th>Out Time</th>
+                    <th>Early Time</th>
+                    <th>Break Time</th>
                     <th>Lunch Break</th>
-                    <th>Rest Time</th>
                     <th>Hours Worked</th>
                     <th>Actions</th>
                   </tr>
@@ -2320,64 +2353,71 @@ export default function Home() {
                 <tbody>
                   {filteredRecords.length === 0 ? (
                     <tr>
-                      <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
+                      <td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
                         No records logged in the selected date range.
                       </td>
                     </tr>
                   ) : (
-                    filteredRecords.slice().reverse().map((record) => (
-                      <tr key={record.date}>
-                        <td style={{ fontWeight: 'bold' }}>{record.date}</td>
-                        <td>
-                          <span className={`${styles.badge} ${
-                            record.status === 'present'
-                              ? styles.badgePresent
-                              : record.status === 'absent'
-                              ? styles.badgeAbsent
-                              : styles.badgeWeeklyOff
-                          }`}>
-                            {record.status}
-                          </span>
-                        </td>
-                        <td>{formatISOToTime(record.inTime)}</td>
-                        <td>{formatISOToTime(record.outTime)}</td>
-                        <td>{record.status === 'present' ? `${record.lunchDeduction ? Math.round(record.lunchDeduction) : 0} mins` : '--'}</td>
-                        <td>
-                          <div style={{ fontWeight: '600' }}>
-                            {record.status === 'present' ? `${Math.round(record.restTimeTotal)} mins` : '--'}
-                          </div>
-                          {record.status === 'present' && record.restSessions && record.restSessions.length > 0 && (
-                            <div className={styles.breakList}>
-                              {record.restSessions.map((session, idx) => (
-                                <div key={idx} className={styles.breakItem}>
-                                  • {formatISOToTime(session.start)} - {session.end ? formatISOToTime(session.end) : 'Active'} 
-                                  {session.end && ` (${Math.round((new Date(session.end).getTime() - new Date(session.start).getTime()) / 60000)}m)`}
-                                </div>
-                              ))}
+                    filteredRecords.slice().reverse().map((record) => {
+                      const isTodayRecord = record.date === todayStr;
+                      const currentBreakMins = isTodayRecord && record.activeRestStart ? liveRestMins : (record.restTimeTotal || 0);
+                      const currentWorkedHours = isTodayRecord && !record.outTime ? liveWorkedHoursDecimal : record.workedHours;
+
+                      return (
+                        <tr key={record.date}>
+                          <td style={{ fontWeight: 'bold' }}>{record.date}</td>
+                          <td>
+                            <span className={`${styles.badge} ${
+                              record.status === 'present'
+                                ? styles.badgePresent
+                                : record.status === 'absent'
+                                ? styles.badgeAbsent
+                                : styles.badgeWeeklyOff
+                            }`}>
+                              {record.status}
+                            </span>
+                          </td>
+                          <td>{formatISOToTime(record.inTime)}</td>
+                          <td>{formatISOToTime(record.outTime)}</td>
+                          <td>
+                            {record.status === 'present'
+                              ? (record.earlyTime && record.earlyTime > 0 ? `${Math.round(record.earlyTime)} mins` : '--')
+                              : '--'}
+                          </td>
+                          <td>
+                            <div style={{ fontWeight: '600' }}>
+                              {record.status === 'present' ? `${Math.round(currentBreakMins)} mins` : '--'}
                             </div>
-                          )}
-                        </td>
-                        <td style={{ fontWeight: 'bold', color: record.status === 'present' ? 'var(--color-present)' : 'inherit' }}>
-                          {record.status === 'present'
-                            ? formatHoursToText(
-                                record.date === todayStr && !record.outTime
-                                  ? liveWorkedHoursDecimal
-                                  : record.workedHours
-                              )
-                            : '--'}
-                        </td>
-                        <td>
-                          <div className={styles.actionCell}>
-                            <button className={`${styles.btnAction} ${styles.btnEdit}`} onClick={() => openEditModal(record.date)}>
-                              Edit
-                            </button>
-                            <button className={`${styles.btnAction} ${styles.btnDelete}`} onClick={() => handleDeleteRecord(record.date)}>
-                              Delete
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
+                            {record.status === 'present' && record.restSessions && record.restSessions.length > 0 && (
+                              <div className={styles.breakList}>
+                                {record.restSessions.map((session, idx) => (
+                                  <div key={idx} className={styles.breakItem}>
+                                    • {formatISOToTime(session.start)} - {session.end ? formatISOToTime(session.end) : 'Active'} 
+                                    {session.end && ` (${Math.round((new Date(session.end).getTime() - new Date(session.start).getTime()) / 60000)}m)`}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                          <td>{record.status === 'present' ? `${record.lunchDeduction ? Math.round(record.lunchDeduction) : 0} mins` : '--'}</td>
+                          <td style={{ fontWeight: 'bold', color: record.status === 'present' ? 'var(--color-present)' : 'inherit' }}>
+                            {record.status === 'present'
+                              ? formatHoursToText(currentWorkedHours)
+                              : '--'}
+                          </td>
+                          <td>
+                            <div className={styles.actionCell}>
+                              <button className={`${styles.btnAction} ${styles.btnEdit}`} onClick={() => openEditModal(record.date)}>
+                                Edit
+                              </button>
+                              <button className={`${styles.btnAction} ${styles.btnDelete}`} onClick={() => handleDeleteRecord(record.date)}>
+                                Delete
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
