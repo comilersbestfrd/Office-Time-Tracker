@@ -1731,10 +1731,9 @@ export default function Home() {
         if (!isHoliday) {
           totalWorkDays++;
           if (isToday && !record.outTime) {
-            const effectiveHours = liveWorkedHoursDecimal + (liveRestMins / 60);
-            pendingHoursTotal += (8 - effectiveHours);
+            pendingHoursTotal += (8 - liveWorkedHoursDecimal);
           } else {
-            pendingHoursTotal += (record.pendingHours !== undefined ? record.pendingHours : (8 - (worked + (record.restTimeTotal || 0) / 60)));
+            pendingHoursTotal += (record.pendingHours !== undefined ? record.pendingHours : (8 - worked));
           }
         }
         hoursWorkedTotal += worked;
@@ -2195,7 +2194,7 @@ export default function Home() {
               <div className={styles.statValue} style={{ color: 'var(--color-present)' }}>
                 {formatHoursToText(displayStats.hoursWorkedTotal)}
               </div>
-              <div className={styles.statSubtext}>Pure work time (breaks excluded)</div>
+              <div className={styles.statSubtext}>Actual shift time (includes break time)</div>
             </div>
 
             <div className={`${styles.glass} ${styles.statCard} ${displayStats.pendingHoursTotal > 0 ? styles.statCardPendingPositive : styles.statCardPendingNegative}`}>
@@ -2212,7 +2211,7 @@ export default function Home() {
                   : `+${formatHoursToText(Math.abs(displayStats.pendingHoursTotal))}`}
               </div>
               <div className={styles.statSubtext}>
-                {displayStats.pendingHoursTotal > 0 ? 'Hours remaining (break time credited)' : 'Extra hours accumulated'}
+                {displayStats.pendingHoursTotal > 0 ? 'Hours remaining to meet quota' : 'Extra hours accumulated'}
               </div>
             </div>
           </div>
