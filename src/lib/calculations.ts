@@ -119,8 +119,14 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
     }
   }
 
-  // Work time = (elapsed work time after 9:00 AM - lunch break). Break time is counted as worked time.
-  const netWorkedMs = Math.max(0, elapsedMs - lunchOverlapMs);
+  // Allowed rest limit. Daily break time is counted in work time up to allowed limit (default 20m).
+  // Any break time that goes beyond the limit is deducted from work time and becomes pending.
+  const allowedRest = record.allowedRestLimit !== undefined ? record.allowedRestLimit : defaultAllowedRest;
+  const excessRestMinutes = Math.max(0, totalRestMinutes - allowedRest);
+  const excessRestMs = excessRestMinutes * 60 * 1000;
+
+  // Work time = (elapsed work time after 9:00 AM - lunch break - excess break time)
+  const netWorkedMs = Math.max(0, elapsedMs - lunchOverlapMs - excessRestMs);
   const workedHours = netWorkedMs / (1000 * 60 * 60);
   const pendingHours = 8 - workedHours;
 

@@ -656,16 +656,17 @@ export default function Home() {
     }
   ];
 
-  const setPresetRange = (preset: 'this-month' | 'last-30' | 'all') => {
+  const setPresetRange = (preset: 'this-month' | 'last-month' | 'all') => {
     const today = new Date();
     if (preset === 'this-month') {
       setFilterStartDate(getTodayDateString(new Date(today.getFullYear(), today.getMonth(), 1)));
       setFilterEndDate(getTodayDateString(today));
-    } else if (preset === 'last-30') {
-      const past30 = new Date();
-      past30.setDate(today.getDate() - 30);
-      setFilterStartDate(getTodayDateString(past30));
-      setFilterEndDate(getTodayDateString(today));
+    } else if (preset === 'last-month') {
+      // First and last day of previous month
+      const firstDayLastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+      const lastDayLastMonth = new Date(today.getFullYear(), today.getMonth(), 0);
+      setFilterStartDate(getTodayDateString(firstDayLastMonth));
+      setFilterEndDate(getTodayDateString(lastDayLastMonth));
     } else if (preset === 'all') {
       if (records.length > 0) {
         setFilterStartDate(records[0].date);
@@ -702,6 +703,13 @@ export default function Home() {
         totalRestMs += now.getTime() - restStart.getTime();
       }
 
+      const totalRestMins = totalRestMs / (60 * 1000);
+      const effectiveAllowedLimit = todayRecord.allowedRestLimit !== undefined
+        ? todayRecord.allowedRestLimit
+        : (allowedRestLimit || defaultDailyRestLimit || 20);
+      const excessRestMins = Math.max(0, totalRestMins - effectiveAllowedLimit);
+      const excessRestMs = excessRestMins * 60 * 1000;
+
       // Work time always starts from 09:00 AM
       const nineAm = new Date(`${todayRecord.date}T09:00:00`);
       const effectiveStartTime = inTime.getTime() < nineAm.getTime() ? nineAm : inTime;
@@ -721,8 +729,8 @@ export default function Home() {
         lunchOverlapMs = overlapEnd.getTime() - overlapStart.getTime();
       }
 
-      // Work time: elapsed time after 9 AM minus lunch break (break time is counted in worked time)
-      const workedMs = Math.max(0, elapsedMs - lunchOverlapMs);
+      // Work time: elapsed time after 9 AM minus lunch break minus excess break beyond allowed limit
+      const workedMs = Math.max(0, elapsedMs - lunchOverlapMs - excessRestMs);
 
       // Calculate running active break timer
       let activeBreakMs = 0;
@@ -785,8 +793,9 @@ export default function Home() {
 
   // Formatter: Decimal Hours to "X Hours Y Mins"
   const formatHoursToText = (hours: number): string => {
-    const h = Math.floor(hours);
-    const m = Math.round((hours - h) * 60);
+    const totalMins = Math.round(hours * 60);
+    const h = Math.floor(totalMins / 60);
+    const m = totalMins % 60;
     return `${h}h ${m}m`;
   };
 
@@ -1920,6 +1929,11 @@ export default function Home() {
                   Clocked In: <strong>{formatISOToTime(todayRecord.inTime)}</strong>
                   {' · '}
                   Break Time: <strong>{liveRestMins > 0 ? `${Math.round(liveRestMins)}m` : '0m'}</strong>
+                  {liveRestMins > allowedRestLimit && (
+                    <span style={{ color: 'var(--color-absent)', fontWeight: 600, marginLeft: '0.35rem' }}>
+                      ({Math.round(liveRestMins - allowedRestLimit)}m pending)
+                    </span>
+                  )}
                   {todayRecord.activeRestStart && (
                     <span style={{ color: 'var(--color-warning)', marginLeft: '0.35rem' }}>
                       (☕ Running: {formatMsToHMS(liveActiveBreakMs)})
@@ -1935,7 +1949,14 @@ export default function Home() {
             {todayRecord && todayRecord.status === 'present' && (
               <div className={styles.restProgressContainer}>
                 <div className={styles.restText}>
-                  <span>Break Time: <strong>{liveRestMins > 0 ? formatHoursToText(liveRestMins / 60) : '0h 00m'}</strong></span>
+                  <span>
+                    Break Time: <strong>{liveRestMins > 0 ? formatHoursToText(liveRestMins / 60) : '0h 0m'}</strong>
+                    {liveRestMins > allowedRestLimit && (
+                      <span style={{ color: 'var(--color-absent)', fontWeight: 600, marginLeft: '0.4rem', fontSize: '0.85rem' }}>
+                        ({Math.round(liveRestMins - allowedRestLimit)}m over limit - pending)
+                      </span>
+                    )}
+                  </span>
                   <div className={styles.restLimitControls}>
                     <span>Limit: <strong>{allowedRestLimit}m</strong></span>
                     <button
@@ -2161,7 +2182,7 @@ export default function Home() {
             </div>
             <div className={styles.filterPresets}>
               <button className={styles.presetBtn} onClick={() => setPresetRange('this-month')}>This Month</button>
-              <button className={styles.presetBtn} onClick={() => setPresetRange('last-30')}>Last 30 Days</button>
+              <button className={styles.presetBtn} onClick={() => setPresetRange('last-month')}>Last Month</button>
               <button className={styles.presetBtn} onClick={() => setPresetRange('all')}>All Time</button>
             </div>
           </div>
@@ -2194,7 +2215,7 @@ export default function Home() {
               <div className={styles.statValue} style={{ color: 'var(--color-present)' }}>
                 {formatHoursToText(displayStats.hoursWorkedTotal)}
               </div>
-              <div className={styles.statSubtext}>Actual shift time (includes break time)</div>
+              <div className={styles.statSubtext}>Actual shift time (includes break up to limit)</div>
             </div>
 
             <div className={`${styles.glass} ${styles.statCard} ${displayStats.pendingHoursTotal > 0 ? styles.statCardPendingPositive : styles.statCardPendingNegative}`}>
@@ -2453,26 +2474,28 @@ export default function Home() {
 
               {modalStatus === 'present' && (
                 <>
-                  <div className={styles.formGroup}>
-                    <label className={styles.formLabel}>In Time (Clock In)</label>
-                    <input
-                      type="time"
-                      className={styles.formInput}
-                      value={modalInTime}
-                      onChange={(e) => setModalInTime(e.target.value)}
-                      required
-                    />
-                  </div>
+                  <div className={styles.formRow}>
+                    <div className={styles.formGroup} style={{ marginBottom: 0 }}>
+                      <label className={styles.formLabel}>In Time (Clock In)</label>
+                      <input
+                        type="time"
+                        className={styles.formInput}
+                        value={modalInTime}
+                        onChange={(e) => setModalInTime(e.target.value)}
+                        required
+                      />
+                    </div>
 
-                  <div className={styles.formGroup}>
-                    <label className={styles.formLabel}>Out Time (Clock Out)</label>
-                    <input
-                      type="time"
-                      className={styles.formInput}
-                      value={modalOutTime}
-                      onChange={(e) => setModalOutTime(e.target.value)}
-                      placeholder="Still working..."
-                    />
+                    <div className={styles.formGroup} style={{ marginBottom: 0 }}>
+                      <label className={styles.formLabel}>Out Time (Clock Out)</label>
+                      <input
+                        type="time"
+                        className={styles.formInput}
+                        value={modalOutTime}
+                        onChange={(e) => setModalOutTime(e.target.value)}
+                        placeholder="Still working..."
+                      />
+                    </div>
                   </div>
 
                   <div className={styles.formGroup}>
