@@ -3,46 +3,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import styles from './page.module.css';
-import { auth, db, googleProvider, remoteConfig, logAnalyticsEvent } from '@/lib/firebase';
+import { auth, db, googleProvider, logAnalyticsEvent } from '@/lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { ref, onValue, set, get } from 'firebase/database';
-import { fetchAndActivate, getValue, onConfigUpdate, activate } from 'firebase/remote-config';
 import { RecordSession, DayRecord, DashboardStats, calculateRecordHours, Holiday } from '@/lib/calculations';
 
 const ADMIN_EMAIL = 'woxxinsolution12@gmail.com';
 
-const detectAdBlocker = async (): Promise<boolean> => {
-  if (typeof window === 'undefined' || typeof document === 'undefined') return false;
-
-  try {
-    const testAd = document.createElement('div');
-    testAd.className = 'adsbox ad-placement doubleclick-ad ad-placeholder pub_300x250 pub_300x250m pub_728x90 text-ad textAd text_ad text_ads text-ads text-ad-links';
-    testAd.style.position = 'absolute';
-    testAd.style.left = '-9999px';
-    testAd.style.top = '-9999px';
-    testAd.style.width = '10px';
-    testAd.style.height = '10px';
-    document.body.appendChild(testAd);
-
-    const isHidden = window.getComputedStyle(testAd).display === 'none' ||
-      window.getComputedStyle(testAd).visibility === 'hidden';
-    document.body.removeChild(testAd);
-
-    return isHidden;
-  } catch (e) {
-    return false;
-  }
-};
-
 export default function Home() {
   const router = useRouter();
 
-  // Remote Config: controls whether ads are shown
-  // appConfig === 1 => show ads, appConfig === 0 => hide ads
-  const [showAds, setShowAds] = useState<boolean>(true);
-  const [isAdBlockActive, setIsAdBlockActive] = useState<boolean>(false);
-  const [adRefreshTime, setAdRefreshTime] = useState<number>(15);
-  const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
   const [defaultDailyRestLimit, setDefaultDailyRestLimit] = useState<number>(20);
   const [allowedRestLimit, setAllowedRestLimit] = useState<number>(20);
   const [liveActiveBreakMs, setLiveActiveBreakMs] = useState<number>(0);
@@ -377,93 +347,7 @@ export default function Home() {
 
   }, []);
 
-  // Firebase Remote Config: fetch appConfig, handle updates and ad refresh
-  useEffect(() => {
-    const handleConfigParse = () => {
-      const valStr = getValue(remoteConfig, 'appConfig').asString();
-      try {
-        const parsed = JSON.parse(valStr);
-        // 1 = show ads, 0 = hide ads
-        setShowAds(parsed.adStatus === 1);
-        if (typeof parsed.adRefreshTime === 'number' && parsed.adRefreshTime > 0) {
-          setAdRefreshTime(parsed.adRefreshTime);
-        }
-      } catch (e) {
-        console.warn('Failed to parse appConfig JSON string:', valStr, e);
-        setShowAds(true); // fallback: show ads
-        setAdRefreshTime(15);
-      }
-    };
 
-    // 1. Initial fetch & activate
-    fetchAndActivate(remoteConfig)
-      .then(() => {
-        handleConfigParse();
-      })
-      .catch((err) => {
-        console.warn('Remote Config fetch failed, using default (show ads):', err);
-        setShowAds(true); // fallback: show ads
-        setAdRefreshTime(15);
-      });
-
-    // 2. Real-time Remote Config updates subscription
-    try {
-      const unsubscribe = onConfigUpdate(remoteConfig, {
-        next: (configUpdate) => {
-          activate(remoteConfig)
-            .then(() => {
-              handleConfigParse();
-            })
-            .catch((activateErr) => {
-              console.error('Remote Config activation failed:', activateErr);
-            });
-        },
-        error: (err) => {
-          console.warn('Remote Config real-time update error:', err);
-        },
-        complete: () => {}
-      });
-      return () => unsubscribe();
-    } catch (realtimeErr) {
-      console.warn('Realtime Remote Config not supported or failed to init:', realtimeErr);
-    }
-  }, []);
-
-  // AdBlocker check effect
-  useEffect(() => {
-    if (!showAds) {
-      setIsAdBlockActive(false);
-      return;
-    }
-
-    const checkBlocker = async () => {
-      // Small timeout to let initial script loading attempt execute
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      const isBlocked = await detectAdBlocker();
-      setIsAdBlockActive(isBlocked);
-    };
-
-    checkBlocker();
-  }, [showAds]);
-
-  // Periodic Ad Refresh scheduler
-  useEffect(() => {
-    if (!showAds || isAdBlockActive || adRefreshTime <= 0) return;
-
-    const interval = setInterval(() => {
-      // Only increment refresh trigger and reload ad iframes if the browser tab is active/visible
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        setRefreshTrigger((prev) => prev + 1);
-      }
-    }, adRefreshTime * 1000);
-
-    return () => clearInterval(interval);
-  }, [showAds, isAdBlockActive, adRefreshTime]);
-
-  // Popunder Ad Trigger — triggers only on specific user action events
-  const triggerPopunder = () => {
-    // Scripts are loaded at root layout level for consistent delivery
-  };
   // Break Running Background Notification — fires when tab is hidden or minimized while break is active
   useEffect(() => {
     const isBreakActive = !!(todayRecord?.status === 'present' && todayRecord?.activeRestStart);
@@ -827,7 +711,6 @@ export default function Home() {
 
   // Clock Actions
   const handleClockIn = async () => {
-    triggerPopunder();
     logAnalyticsEvent('clock_in');
     const now = new Date();
     // Enforce minimum In time: 8:00 AM
@@ -982,7 +865,6 @@ export default function Home() {
   };
 
   const handleEndRest = async () => {
-    triggerPopunder();
     logAnalyticsEvent('break_end');
     if (pipWindowRef.current && !pipWindowRef.current.closed) {
       try {
@@ -1069,7 +951,6 @@ export default function Home() {
   };
 
   const handleClockOut = async () => {
-    triggerPopunder();
     logAnalyticsEvent('clock_out');
     if (pipWindowRef.current && !pipWindowRef.current.closed) {
       try {
@@ -1109,7 +990,6 @@ export default function Home() {
 
   // Manual Break Handler - adds a break session to today's record
   const handleSaveManualBreak = async () => {
-    triggerPopunder();
     if (!manualBreakStart || !manualBreakEnd) {
       alert('Please specify both start and end times for the break!');
       return;
@@ -1189,7 +1069,6 @@ export default function Home() {
 
   // Manual Start Tracker Handler - creates a present record with a custom in-time
   const handleManualStart = async () => {
-    triggerPopunder();
     if (!manualInPunch) {
       alert('Please specify an In-Punch time!');
       return;
@@ -1227,7 +1106,6 @@ export default function Home() {
   };
 
   const handleMarkAbsentToday = async () => {
-    triggerPopunder();
     const dateStr = getTodayDateString();
     const newRecord: DayRecord = {
       date: dateStr,
@@ -1451,7 +1329,6 @@ export default function Home() {
   };
 
   const handleAddModalBreak = () => {
-    triggerPopunder();
     if (!newBreakStart || !newBreakEnd) {
       alert("Please specify both start and end times for the break!");
       return;
@@ -1541,7 +1418,6 @@ export default function Home() {
   // Save Modal Data
   const handleSaveModal = async (e: React.FormEvent) => {
     e.preventDefault();
-    triggerPopunder();
 
     // Validation: No future dates allowed
     const today = new Date();
@@ -2013,11 +1889,11 @@ export default function Home() {
               {/* Not clocked in yet */}
               {(!todayRecord || (todayRecord.status !== 'present' && todayRecord.status !== 'absent' && todayRecord.status !== 'weekly-off')) && (
                 <>
-                  <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleClockIn} data-popunder-action="true">
+                  <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleClockIn}>
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg>
                     Clock In
                   </button>
-                  <button className={`${styles.btn} ${styles.btnSecondary}`} onClick={handleMarkAbsentToday} data-popunder-action="true">
+                  <button className={`${styles.btn} ${styles.btnSecondary}`} onClick={handleMarkAbsentToday}>
                     Mark Absent
                   </button>
                 </>
@@ -2032,13 +1908,13 @@ export default function Home() {
                       Start Break (Shortcut: R)
                     </button>
                   ) : (
-                    <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleEndRest} data-popunder-action="true">
+                    <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleEndRest}>
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><path d="m10 15 5-3-5-3v6z"/></svg>
                       Resume Work (Shortcut: R)
                     </button>
                   )}
                   
-                  <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleClockOut} data-popunder-action="true">
+                  <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleClockOut}>
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
                     Leave Today
                   </button>
@@ -2052,7 +1928,7 @@ export default function Home() {
                     Today&apos;s shift is locked. You can manually edit it in the logs or resume working.
                   </div>
                   {todayRecord.status === 'present' && todayRecord.outTime && (
-                    <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleResumeShift} style={{ width: '100%' }} data-popunder-action="true">
+                    <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleResumeShift} style={{ width: '100%' }}>
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
                       Resume Work
                     </button>
@@ -2562,7 +2438,6 @@ export default function Home() {
                         type="button"
                         className={`${styles.btn} ${styles.btnSecondary} ${styles.btnAddBreak}`}
                         onClick={handleAddModalBreak}
-                        data-popunder-action="true"
                       >
                         + Add Break
                       </button>
@@ -2596,7 +2471,7 @@ export default function Home() {
                 >
                   Cancel
                 </button>
-                <button type="submit" className={`${styles.btn} ${styles.btnPrimary}`} data-popunder-action="true">
+                <button type="submit" className={`${styles.btn} ${styles.btnPrimary}`}>
                   Save Record
                 </button>
               </div>
@@ -2804,7 +2679,6 @@ export default function Home() {
                   type="button"
                   className={`${styles.btn} ${styles.btnPrimary}`}
                   onClick={handleSaveManualBreak}
-                  data-popunder-action="true"
                 >
                   Save Break
                 </button>
@@ -2847,7 +2721,6 @@ export default function Home() {
                   type="button"
                   className={`${styles.btn} ${styles.btnPrimary}`}
                   onClick={handleManualStart}
-                  data-popunder-action="true"
                 >
                   Start Tracking
                 </button>
@@ -3116,7 +2989,6 @@ export default function Home() {
               type="button"
               className={styles.activeBreakPopupBtn}
               onClick={handleEndRest}
-              data-popunder-action="true"
             >
               ⏸️ Resume Work
             </button>
@@ -3130,35 +3002,6 @@ export default function Home() {
                 📌 Pop Out to Desktop (Always on Top)
               </button>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* AdBlocker Forceful Overlay Modal */}
-      {isAdBlockActive && (
-        <div className={styles.adBlockOverlay}>
-          <div className={`${styles.glass} ${styles.adBlockContent}`}>
-            <div className={styles.adBlockIcon}>
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                <line x1="12" y1="9" x2="12" y2="13" />
-                <line x1="12" y1="17" x2="12.01" y2="17" />
-              </svg>
-            </div>
-            <h2 className={styles.adBlockTitle}>Adblocker Detected</h2>
-            <p className={styles.adBlockDesc}>
-              We detected that you are using an adblocker. Please disable your adblocker to continue using Office Time Tracker.
-            </p>
-            <button
-              type="button"
-              className={styles.adBlockBtn}
-              onClick={() => window.location.reload()}
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
-              </svg>
-              <span>Check Again & Refresh</span>
-            </button>
           </div>
         </div>
       )}
