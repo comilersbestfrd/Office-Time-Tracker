@@ -2444,3 +2444,156 @@
   }
 }
 
+/* Quick Break Shortcut Widget */
+.quickBreakContainer {
+  width: 100%;
+  margin-top: 0.6rem;
+  padding: 0.65rem 0.85rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  transition: var(--transition-smooth);
+}
+
+.quickBreakContainer:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.quickBreakHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.quickBreakSuccessBadge {
+  color: var(--color-present);
+  font-size: 0.74rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.quickBreakControlsRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.quickBreakStepper {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.quickBreakStepBtn {
+  background: rgba(255, 255, 255, 0.06);
+  border: none;
+  color: var(--text-primary);
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: var(--transition-smooth);
+  user-select: none;
+}
+
+.quickBreakStepBtn:hover:not(:disabled) {
+  background: var(--accent-blue);
+  color: #fff;
+}
+
+.quickBreakStepBtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.quickBreakDisplay {
+  min-width: 48px;
+  text-align: center;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #fff;
+  padding: 0 4px;
+}
+
+.quickBreakDirectBtn {
+  flex: 1;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.2) 0%, rgba(99, 102, 241, 0.25) 100%);
+  color: #bfdbfe;
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  border-radius: 8px;
+  padding: 0.45rem 0.65rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  cursor: pointer;
+  transition: var(--transition-smooth);
+  min-height: 32px;
+}
+
+.quickBreakDirectBtn:hover {
+  background: linear-gradient(135deg, var(--accent-blue) 0%, #4f46e5 100%);
+  color: #ffffff;
+  border-color: var(--accent-blue);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+  transform: translateY(-1px);
+}
+
+.quickBreakDirectBtn:active {
+  transform: translateY(0);
+}
+
+.quickBreakPresets {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.quickBreakPresetChip {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.18rem 0.45rem;
+  cursor: pointer;
+  transition: var(--transition-smooth);
+}
+
+.quickBreakPresetChip:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.quickBreakPresetActive {
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(59, 130, 246, 0.5);
+  color: #93c5fd;
+}
+
+

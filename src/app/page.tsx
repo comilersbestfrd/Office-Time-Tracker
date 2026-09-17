@@ -85,6 +85,8 @@ export default function Home() {
   const [showManualBreakModal, setShowManualBreakModal] = useState<boolean>(false);
   const [manualBreakStart, setManualBreakStart] = useState<string>('');
   const [manualBreakEnd, setManualBreakEnd] = useState<string>('');
+  const [quickBreakMinutes, setQuickBreakMinutes] = useState<number>(3);
+  const [quickBreakFeedback, setQuickBreakFeedback] = useState<string | null>(null);
   const [showManualStartModal, setShowManualStartModal] = useState<boolean>(false);
   const [manualInPunch, setManualInPunch] = useState<string>('');
   const [modalDate, setModalDate] = useState<string>('');
@@ -1067,6 +1069,133 @@ export default function Home() {
     setShowManualBreakModal(false);
   };
 
+  // Quick Break Shortcut Handler - directly adds a break of specified minutes into today's record
+  const handleDirectAddBreak = async (minsToAdd: number) => {
+    const todayStrLocal = getTodayDateString();
+    const freshTodayRecord = recordsRef.current.find((r) => r.date === todayStrLocal);
+    if (!freshTodayRecord || freshTodayRecord.status !== 'present') {
+      alert('You need an active (present) record for today to add a break!');
+      return;
+    }
+
+    if (freshTodayRecord.outTime) {
+      alert("Today's shift is already finished. Please resume work first to add a break!");
+      return;
+    }
+
+    if (freshTodayRecord.activeRestStart) {
+      alert('A live break is currently running! Please resume work first before adding a manual break.');
+      return;
+    }
+
+    const durationMins = Math.max(1, Math.round(minsToAdd));
+    const durationMs = durationMins * 60 * 1000;
+    const now = new Date();
+    const inTimeMs = freshTodayRecord.inTime
+      ? new Date(freshTodayRecord.inTime).getTime()
+      : now.getTime() - durationMs;
+
+    if (now.getTime() - inTimeMs < durationMs) {
+      const elapsedMins = Math.max(0, Math.round((now.getTime() - inTimeMs) / 60000));
+      alert(`Cannot add a ${durationMins}-minute break because your shift started only ${elapsedMins} minutes ago!`);
+      return;
+    }
+
+    // Existing completed sessions
+    const existingSessions = (freshTodayRecord.restSessions || []).filter((s) => s.start && s.end);
+
+    // Try placing break immediately ending now: [now - duration, now]
+    let candidateEndMs = now.getTime();
+    let candidateStartMs = candidateEndMs - durationMs;
+
+    // Check if [candidateStartMs, candidateEndMs] overlaps with any existing break
+    const overlaps = (startA: number, endA: number, startB: number, endB: number) =>
+      startA < endB && endA > startB;
+
+    let hasConflict = existingSessions.some((s) =>
+      overlaps(candidateStartMs, candidateEndMs, new Date(s.start).getTime(), new Date(s.end!).getTime())
+    );
+
+    // If conflict, find the most recent available continuous free gap between inTimeMs and now
+    if (hasConflict) {
+      const sorted = [...existingSessions].sort(
+        (a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()
+      );
+
+      // Build intervals of taken break times
+      const intervals: Array<{ start: number; end: number }> = sorted.map((s) => ({
+        start: new Date(s.start).getTime(),
+        end: new Date(s.end!).getTime(),
+      }));
+
+      // Find free windows from inTime to now
+      const freeGaps: Array<{ start: number; end: number }> = [];
+      let cursor = inTimeMs;
+      for (const b of intervals) {
+        if (b.start > cursor) {
+          freeGaps.push({ start: cursor, end: Math.min(now.getTime(), b.start) });
+        }
+        cursor = Math.max(cursor, b.end);
+      }
+      if (cursor < now.getTime()) {
+        freeGaps.push({ start: cursor, end: now.getTime() });
+      }
+
+      // Search backwards from the latest free gap that has room for durationMs
+      let foundGap: { start: number; end: number } | null = null;
+      for (let i = freeGaps.length - 1; i >= 0; i--) {
+        const gap = freeGaps[i];
+        if (gap.end - gap.start >= durationMs) {
+          foundGap = gap;
+          break;
+        }
+      }
+
+      if (!foundGap) {
+        alert(
+          `Could not find a continuous free working slot of ${durationMins} minutes today without overlapping existing breaks!`
+        );
+        return;
+      }
+
+      // Place at the end of the found free gap
+      candidateEndMs = foundGap.end;
+      candidateStartMs = candidateEndMs - durationMs;
+    }
+
+    const startDate = new Date(candidateStartMs);
+    const endDate = new Date(candidateEndMs);
+
+    const newSession: RecordSession = {
+      start: startDate.toISOString(),
+      end: endDate.toISOString(),
+    };
+
+    const updatedSessions = [...(freshTodayRecord.restSessions || []), newSession];
+    updatedSessions.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+
+    let totalMins = 0;
+    updatedSessions.forEach((s) => {
+      if (s.end) {
+        totalMins += (new Date(s.end).getTime() - new Date(s.start).getTime()) / 60000;
+      }
+    });
+
+    const updatedRecord: DayRecord = {
+      ...freshTodayRecord,
+      restSessions: updatedSessions,
+      restTimeTotal: Math.round(totalMins),
+    };
+
+    await saveRecordApi(updatedRecord);
+
+    // Show temporary feedback toast/badge
+    setQuickBreakFeedback(`✓ Added ${durationMins}m break!`);
+    setTimeout(() => {
+      setQuickBreakFeedback(null);
+    }, 2500);
+  };
+
   // Manual Start Tracker Handler - creates a present record with a custom in-time
   const handleManualStart = async () => {
     if (!manualInPunch) {
@@ -1940,14 +2069,73 @@ export default function Home() {
             {/* Quick Action Buttons */}
             <div className={styles.clockButtons} style={{ marginTop: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '0.75rem' }}>
               {todayRecord && todayRecord.status === 'present' && !todayRecord.outTime && (
-                <button
-                  type="button"
-                  className={`${styles.btn} ${styles.btnSecondary}`}
-                  onClick={() => setShowManualBreakModal(true)}
-                  style={{ fontSize: '0.85rem' }}
-                >
-                  ☕ Add Manual Break
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className={`${styles.btn} ${styles.btnSecondary}`}
+                    onClick={() => setShowManualBreakModal(true)}
+                    style={{ fontSize: '0.85rem' }}
+                  >
+                    ☕ Add Manual Break
+                  </button>
+
+                  {/* Quick Break Shortcut Widget */}
+                  <div className={styles.quickBreakContainer}>
+                    <div className={styles.quickBreakHeader}>
+                      <span>⚡ Quick Break Shortcut</span>
+                      {quickBreakFeedback ? (
+                        <span className={styles.quickBreakSuccessBadge}>{quickBreakFeedback}</span>
+                      ) : (
+                        <div className={styles.quickBreakPresets}>
+                          {[1, 3, 5, 10].map((m) => (
+                            <button
+                              key={m}
+                              type="button"
+                              className={`${styles.quickBreakPresetChip} ${quickBreakMinutes === m ? styles.quickBreakPresetActive : ''}`}
+                              onClick={() => setQuickBreakMinutes(m)}
+                              title={`Set to ${m} min`}
+                            >
+                              {m}m
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className={styles.quickBreakControlsRow}>
+                      <div className={styles.quickBreakStepper}>
+                        <button
+                          type="button"
+                          className={styles.quickBreakStepBtn}
+                          onClick={() => setQuickBreakMinutes((prev) => Math.max(1, prev - 1))}
+                          title="Decrease duration by 1 min"
+                          disabled={quickBreakMinutes <= 1}
+                        >
+                          −
+                        </button>
+                        <span className={styles.quickBreakDisplay}>{quickBreakMinutes} min</span>
+                        <button
+                          type="button"
+                          className={styles.quickBreakStepBtn}
+                          onClick={() => setQuickBreakMinutes((prev) => Math.min(120, prev + 1))}
+                          title="Increase duration by 1 min"
+                        >
+                          +
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        className={styles.quickBreakDirectBtn}
+                        onClick={() => handleDirectAddBreak(quickBreakMinutes)}
+                        title={`Directly add ${quickBreakMinutes} min break into today's breaks`}
+                      >
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                          <path d="M12 5v14M5 12h14"/>
+                        </svg>
+                        Direct Add Break
+                      </button>
+                    </div>
+                  </div>
+                </>
               )}
               {(!todayRecord || todayRecord.status !== 'present') && (
                 <button
@@ -2635,9 +2823,29 @@ export default function Home() {
               <button className={styles.modalCloseBtn} onClick={() => setShowManualBreakModal(false)}>✕</button>
             </div>
             <div style={{ padding: '1.5rem' }}>
-              <p style={{ color: 'var(--text-secondary)', marginBottom: '1.25rem', fontSize: '0.9rem', lineHeight: '1.4' }}>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: '0.75rem', fontSize: '0.9rem', lineHeight: '1.4' }}>
                 Add a break session to today&apos;s record. Specify the start and end times of your break.
               </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Quick Fill:</span>
+                {[3, 5, 10, 15].map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    className={styles.quickBreakPresetChip}
+                    onClick={() => {
+                      const now = new Date();
+                      const start = new Date(now.getTime() - m * 60000);
+                      const pad = (n: number) => n.toString().padStart(2, '0');
+                      setManualBreakStart(`${pad(start.getHours())}:${pad(start.getMinutes())}`);
+                      setManualBreakEnd(`${pad(now.getHours())}:${pad(now.getMinutes())}`);
+                    }}
+                    title={`Fill last ${m} minutes`}
+                  >
+                    Last {m}m
+                  </button>
+                ))}
+              </div>
               <div className={styles.formGroup}>
                 <label className={styles.formLabel}>Break Start Time</label>
                 <input
