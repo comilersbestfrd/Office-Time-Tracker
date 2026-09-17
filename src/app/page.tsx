@@ -6,7 +6,7 @@ import styles from './page.module.css';
 import { auth, db, googleProvider, logAnalyticsEvent } from '@/lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { ref, onValue, set, get } from 'firebase/database';
-import { RecordSession, DayRecord, DashboardStats, calculateRecordHours, Holiday } from '@/lib/calculations';
+import { RecordSession, ShortLeaveSession, DayRecord, DashboardStats, calculateRecordHours, calculateShortLeaveDeduction, Holiday } from '@/lib/calculations';
 
 const ADMIN_EMAIL = 'woxxinsolution12@gmail.com';
 
@@ -98,6 +98,17 @@ export default function Home() {
   const [newBreakStart, setNewBreakStart] = useState<string>('');
   const [newBreakEnd, setNewBreakEnd] = useState<string>('');
   const [modalNotes, setModalNotes] = useState<string>('');
+
+  // Short Leave State
+  const [showShortLeaveModal, setShowShortLeaveModal] = useState<boolean>(false);
+  const [shortLeaveStart, setShortLeaveStart] = useState<string>('');
+  const [shortLeaveEnd, setShortLeaveEnd] = useState<string>('');
+  const [shortLeaveReason, setShortLeaveReason] = useState<string>('Bank Work');
+  const [customShortLeaveReason, setCustomShortLeaveReason] = useState<string>('');
+  const [modalShortLeaveSessions, setModalShortLeaveSessions] = useState<ShortLeaveSession[]>([]);
+  const [newShortLeaveStart, setNewShortLeaveStart] = useState<string>('');
+  const [newShortLeaveEnd, setNewShortLeaveEnd] = useState<string>('');
+  const [newShortLeaveReason, setNewShortLeaveReason] = useState<string>('Bank Work');
 
   // Forgotten clock-out / "Still Working?" popup states
   const [forgottenRecord, setForgottenRecord] = useState<DayRecord | null>(null);
@@ -615,8 +626,37 @@ export default function Home() {
         lunchOverlapMs = overlapEnd.getTime() - overlapStart.getTime();
       }
 
-      // Work time: elapsed time after 9 AM minus lunch break minus excess break beyond allowed limit
-      const workedMs = Math.max(0, elapsedMs - lunchOverlapMs - excessRestMs);
+      // Calculate Short Leave deduction (time away from work for bank, docs, home, etc.)
+      let shortLeaveDeductionMs = 0;
+      const allShortLeaves: ShortLeaveSession[] = [...(todayRecord.shortLeaveSessions || [])];
+      if (todayRecord.activeShortLeaveStart) {
+        allShortLeaves.push({
+          start: todayRecord.activeShortLeaveStart,
+          end: now.toISOString(),
+          reason: todayRecord.activeShortLeaveReason || 'Short Leave',
+        });
+      }
+      allShortLeaves.forEach((s) => {
+        if (!s.start) return;
+        const sStart = new Date(s.start).getTime();
+        const sEnd = s.end ? new Date(s.end).getTime() : now.getTime();
+        if (sEnd > sStart) {
+          const winStart = Math.max(effectiveStartTime.getTime(), sStart);
+          const winEnd = Math.min(now.getTime(), sEnd);
+          if (winEnd > winStart) {
+            let spanMs = winEnd - winStart;
+            const lunchWinStart = Math.max(winStart, lunchStart.getTime());
+            const lunchWinEnd = Math.min(winEnd, lunchEnd.getTime());
+            if (lunchWinEnd > lunchWinStart) {
+              spanMs -= (lunchWinEnd - lunchWinStart);
+            }
+            shortLeaveDeductionMs += Math.max(0, spanMs);
+          }
+        }
+      });
+
+      // Work time: elapsed time after 9 AM minus lunch break minus excess break beyond allowed limit minus short leave
+      const workedMs = Math.max(0, elapsedMs - lunchOverlapMs - excessRestMs - shortLeaveDeductionMs);
 
       // Calculate running active break timer
       let activeBreakMs = 0;
@@ -1196,6 +1236,120 @@ export default function Home() {
     }, 2500);
   };
 
+  // Short Leave Handler - adds a short leave session (Bank, Docs, Home, etc.) to today's record
+  const handleSaveShortLeave = async () => {
+    if (!shortLeaveStart || !shortLeaveEnd) {
+      alert('Please specify both start and end times for the short leave!');
+      return;
+    }
+    const todayStrLocal = getTodayDateString();
+    const freshTodayRecord = recordsRef.current.find((r) => r.date === todayStrLocal);
+    if (!freshTodayRecord || freshTodayRecord.status !== 'present') {
+      alert('You need an active (present) record for today to add a short leave!');
+      return;
+    }
+
+    const localStartStr = `${todayStrLocal}T${shortLeaveStart}:00`;
+    const localEndStr = `${todayStrLocal}T${shortLeaveEnd}:00`;
+    const startDate = new Date(localStartStr);
+    const endDate = new Date(localEndStr);
+
+    const diffMs = endDate.getTime() - startDate.getTime();
+    if (Math.round(diffMs / 60000) <= 0) {
+      alert('Short leave duration must be at least 1 minute!');
+      return;
+    }
+
+    // Validate: must be within In-Time and Out-Time (or current time)
+    if (freshTodayRecord.inTime) {
+      const inTime = new Date(freshTodayRecord.inTime).getTime();
+      if (startDate.getTime() < inTime) {
+        alert('Short leave start time cannot be before your In-Punch time!');
+        return;
+      }
+    }
+    const outBound = freshTodayRecord.outTime
+      ? new Date(freshTodayRecord.outTime).getTime()
+      : new Date().getTime();
+    if (endDate.getTime() > outBound) {
+      alert('Short leave end time cannot be after your Out-Punch time (or current time if still working)!');
+      return;
+    }
+
+    // Validate: no overlapping with existing short leaves
+    const existingShortLeaves = freshTodayRecord.shortLeaveSessions || [];
+    const hasShortLeaveOverlap = existingShortLeaves.some((s) => {
+      if (!s.end) return false;
+      return isOverlapping(
+        startDate.getTime(), endDate.getTime(),
+        new Date(s.start).getTime(), new Date(s.end).getTime()
+      );
+    });
+    if (hasShortLeaveOverlap) {
+      alert('This short leave overlaps with another recorded short leave! Please choose a different time range.');
+      return;
+    }
+
+    const finalReason = shortLeaveReason === 'Custom' 
+      ? (customShortLeaveReason.trim() || 'Personal Work')
+      : shortLeaveReason;
+
+    const newSession: ShortLeaveSession = {
+      start: startDate.toISOString(),
+      end: endDate.toISOString(),
+      reason: finalReason,
+    };
+
+    const updatedShortLeaves = [...existingShortLeaves, newSession];
+    updatedShortLeaves.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+
+    let totalNetMins = 0;
+    updatedShortLeaves.forEach((s) => {
+      if (s.end) {
+        const d = calculateShortLeaveDeduction(todayStrLocal, s.start, s.end);
+        totalNetMins += d.netDeductedMinutes;
+      }
+    });
+
+    const updatedRecord: DayRecord = {
+      ...freshTodayRecord,
+      shortLeaveSessions: updatedShortLeaves,
+      shortLeaveTotal: Math.round(totalNetMins),
+    };
+
+    await saveRecordApi(updatedRecord);
+    setShortLeaveStart('');
+    setShortLeaveEnd('');
+    setCustomShortLeaveReason('');
+    setShowShortLeaveModal(false);
+  };
+
+  const handleDeleteShortLeave = async (indexToRemove: number) => {
+    if (!confirm('Are you sure you want to remove this short leave entry?')) return;
+    const todayStrLocal = getTodayDateString();
+    const freshTodayRecord = recordsRef.current.find((r) => r.date === todayStrLocal);
+    if (!freshTodayRecord) return;
+
+    const existingShortLeaves = freshTodayRecord.shortLeaveSessions || [];
+    const updatedShortLeaves = existingShortLeaves.filter((_, idx) => idx !== indexToRemove);
+
+    let totalNetMins = 0;
+    updatedShortLeaves.forEach((s) => {
+      if (s.end) {
+        const d = calculateShortLeaveDeduction(todayStrLocal, s.start, s.end);
+        totalNetMins += d.netDeductedMinutes;
+      }
+    });
+
+    const updatedRecord: DayRecord = {
+      ...freshTodayRecord,
+      shortLeaveSessions: updatedShortLeaves,
+      shortLeaveTotal: Math.round(totalNetMins),
+    };
+
+    await saveRecordApi(updatedRecord);
+  };
+
   // Manual Start Tracker Handler - creates a present record with a custom in-time
   const handleManualStart = async () => {
     if (!manualInPunch) {
@@ -1423,6 +1577,10 @@ export default function Home() {
       setModalStatus(record.status);
       setModalRestTime(Math.round(record.restTimeTotal));
       setModalRestSessions(record.restSessions || []);
+      setModalShortLeaveSessions(record.shortLeaveSessions || []);
+      setNewShortLeaveStart('');
+      setNewShortLeaveEnd('');
+      setNewShortLeaveReason('Bank Work');
       setModalNotes(record.notes || '');
 
       if (record.status === 'present' && record.inTime) {
@@ -1451,6 +1609,10 @@ export default function Home() {
       setModalOutTime('17:20');
       setModalRestTime(20);
       setModalRestSessions([]);
+      setModalShortLeaveSessions([]);
+      setNewShortLeaveStart('');
+      setNewShortLeaveEnd('');
+      setNewShortLeaveReason('Bank Work');
       setModalNotes('');
     }
     
@@ -1544,6 +1706,39 @@ export default function Home() {
     setModalRestTime(Math.round(totalMins));
   };
 
+  const handleAddModalShortLeave = () => {
+    if (!newShortLeaveStart || !newShortLeaveEnd) {
+      alert("Please specify both start and end times for the short leave!");
+      return;
+    }
+    const localStartStr = `${modalDate}T${newShortLeaveStart}:00`;
+    const localEndStr = `${modalDate}T${newShortLeaveEnd}:00`;
+    let startDate = new Date(localStartStr);
+    let endDate = new Date(localEndStr);
+    if (endDate.getTime() < startDate.getTime()) {
+      endDate.setDate(endDate.getDate() + 1);
+    }
+    const durationMins = (endDate.getTime() - startDate.getTime()) / 60000;
+    if (Math.round(durationMins) <= 0) {
+      alert("Short leave duration must be at least 1 minute!");
+      return;
+    }
+    const newSession: ShortLeaveSession = {
+      start: startDate.toISOString(),
+      end: endDate.toISOString(),
+      reason: newShortLeaveReason || 'Personal Work',
+    };
+    const updated = [...modalShortLeaveSessions, newSession];
+    updated.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+    setModalShortLeaveSessions(updated);
+    setNewShortLeaveStart('');
+    setNewShortLeaveEnd('');
+  };
+
+  const handleRemoveModalShortLeave = (indexToRemove: number) => {
+    setModalShortLeaveSessions(modalShortLeaveSessions.filter((_, idx) => idx !== indexToRemove));
+  };
+
   // Save Modal Data
   const handleSaveModal = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1564,6 +1759,9 @@ export default function Home() {
       restSessions: [],
       restTimeTotal: 0,
       activeRestStart: null,
+      shortLeaveSessions: [],
+      shortLeaveTotal: 0,
+      activeShortLeaveStart: null,
       workedHours: 0,
       pendingHours: modalStatus === 'absent' ? 8 : 0,
       notes: modalNotes,
@@ -1604,7 +1802,8 @@ export default function Home() {
 
         record.outTime = outDate.toISOString();
       } else {
-        if (modalDate !== todayStrLocal) {
+        // If it's a past date, outTime is required!
+        if (modalDate < todayStrLocal) {
           alert("Out Time is required for past dates!");
           return;
         }
@@ -1613,6 +1812,8 @@ export default function Home() {
 
       const existingRecord = records.find((r) => r.date === modalDate);
       record.activeRestStart = existingRecord ? existingRecord.activeRestStart : null;
+      record.activeShortLeaveStart = existingRecord ? existingRecord.activeShortLeaveStart : null;
+      record.activeShortLeaveReason = existingRecord ? existingRecord.activeShortLeaveReason : null;
       record.allowedRestLimit = existingRecord?.allowedRestLimit !== undefined ? existingRecord.allowedRestLimit : defaultDailyRestLimit;
 
       if (modalRestSessions.length > 0) {
@@ -1631,6 +1832,16 @@ export default function Home() {
         record.restSessions = [];
         record.restTimeTotal = 0;
       }
+
+      // Short Leave Sessions from Modal
+      record.shortLeaveSessions = modalShortLeaveSessions;
+      let totalShortLeaveMins = 0;
+      modalShortLeaveSessions.forEach((s) => {
+        if (s.end) {
+          totalShortLeaveMins += (new Date(s.end).getTime() - new Date(s.start).getTime()) / 60000;
+        }
+      });
+      record.shortLeaveTotal = Math.round(totalShortLeaveMins);
     }
 
     await saveRecordApi(record);
@@ -2070,14 +2281,24 @@ export default function Home() {
             <div className={styles.clockButtons} style={{ marginTop: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '0.75rem' }}>
               {todayRecord && todayRecord.status === 'present' && !todayRecord.outTime && (
                 <>
-                  <button
-                    type="button"
-                    className={`${styles.btn} ${styles.btnSecondary}`}
-                    onClick={() => setShowManualBreakModal(true)}
-                    style={{ fontSize: '0.85rem' }}
-                  >
-                    ☕ Add Manual Break
-                  </button>
+                  <div style={{ display: 'flex', gap: '0.5rem', width: '100%' }}>
+                    <button
+                      type="button"
+                      className={`${styles.btn} ${styles.btnSecondary}`}
+                      onClick={() => setShowManualBreakModal(true)}
+                      style={{ fontSize: '0.85rem', flex: 1 }}
+                    >
+                      ☕ Add Manual Break
+                    </button>
+                    <button
+                      type="button"
+                      className={`${styles.btn} ${styles.btnShortLeave}`}
+                      onClick={() => setShowShortLeaveModal(true)}
+                      style={{ fontSize: '0.85rem', flex: 1 }}
+                    >
+                      🚗 Add Short Leave
+                    </button>
+                  </div>
 
                   {/* Quick Break Shortcut Widget */}
                   <div className={styles.quickBreakContainer}>
@@ -2171,6 +2392,14 @@ export default function Home() {
                       : formatHoursToText(liveWorkedHoursDecimal)}
                   </div>
                 </div>
+                {todayRecord.shortLeaveTotal !== undefined && todayRecord.shortLeaveTotal > 0 && (
+                  <div className={styles.quickStat}>
+                    <div className={styles.quickStatLabel}>Short Leave</div>
+                    <div className={styles.quickStatVal} style={{ color: '#fbbf24' }}>
+                      {todayRecord.shortLeaveTotal}m
+                    </div>
+                  </div>
+                )}
                 <div className={styles.quickStat}>
                   <div className={styles.quickStatLabel}>Pending</div>
                   <div className={styles.quickStatVal} style={{ color: (todayRecord.outTime ? todayRecord.pendingHours : (8 - liveWorkedHoursDecimal)) <= 0 ? 'var(--color-present)' : 'var(--color-absent)' }}>
@@ -2204,6 +2433,62 @@ export default function Home() {
                       </span>
                     </div>
                   )}
+                </div>
+              </div>
+            )}
+
+            {/* Today's Short Leaves Log */}
+            {todayRecord && todayRecord.status === 'present' && todayRecord.shortLeaveSessions && todayRecord.shortLeaveSessions.length > 0 && (
+              <div className={styles.todayShortLeavesCard}>
+                <div className={styles.todayShortLeavesHeader}>
+                  <span>🚗 Today&apos;s Short Leaves ({todayRecord.shortLeaveSessions.length})</span>
+                  <span className={styles.todayShortLeavesTotal}>-{todayRecord.shortLeaveTotal || 0}m work time</span>
+                </div>
+                <div className={styles.todayShortLeavesList}>
+                  {todayRecord.shortLeaveSessions.map((session, idx) => {
+                    const deduction = calculateShortLeaveDeduction(todayRecord.date, session.start, session.end || new Date().toISOString());
+                    return (
+                      <div key={idx} className={styles.todayShortLeaveItem}>
+                        <span className={styles.shortLeaveReasonBadge}>
+                          {session.reason === 'Bank Work' && '🏦'}
+                          {session.reason === 'Document Work' && '📄'}
+                          {session.reason === 'Home Work' && '🏠'}
+                          {session.reason === 'Personal Work' && '🏃'}
+                          {!['Bank Work', 'Document Work', 'Home Work', 'Personal Work'].includes(session.reason) && '📌'}
+                          {' '}{session.reason}
+                        </span>
+                        <span className={styles.shortLeaveItemTime}>
+                          {formatISOToTime(session.start)} - {session.end ? formatISOToTime(session.end) : 'Active'}
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span
+                            className={styles.shortLeaveItemDuration}
+                            title={deduction.lunchOverlapMinutes > 0 ? `Gross: ${deduction.grossMinutes}m, Lunch Break (1-2 PM): -${deduction.lunchOverlapMinutes}m` : undefined}
+                          >
+                            -{deduction.netDeductedMinutes}m
+                            {deduction.lunchOverlapMinutes > 0 && (
+                              <span style={{ fontSize: '0.72rem', color: '#10b981', marginLeft: '4px', fontWeight: 500 }}>(lunch break excluded)</span>
+                            )}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteShortLeave(idx)}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              color: 'var(--color-absent)',
+                              cursor: 'pointer',
+                              fontSize: '0.85rem',
+                              padding: '0 4px',
+                            }}
+                            title="Remove short leave"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -2630,6 +2915,83 @@ export default function Home() {
                         + Add Break
                       </button>
                     </div>
+
+                    {/* Short Leaves Editor inside Modal */}
+                    <div className={styles.manualBreaksEditor}>
+                      <div className={styles.formGroupHeader}>
+                        <label className={styles.formLabel}>🚗 Short Leaves (Bank, Docs, Home etc.)</label>
+                        <span className={styles.formLabelHint} style={{ color: '#fbbf24' }}>Deducted from work time</span>
+                      </div>
+
+                      {modalShortLeaveSessions.length > 0 && (
+                        <div className={styles.modalBreaksEditList}>
+                          {modalShortLeaveSessions.map((s, idx) => {
+                            const deduction = calculateShortLeaveDeduction(modalDate, s.start, s.end || `${modalDate}T18:15:00`);
+                            return (
+                              <div key={idx} className={styles.modalBreakEditItem}>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                  <span style={{ fontWeight: 600, fontSize: '0.82rem', color: '#fbbf24' }}>{s.reason || 'Personal Work'}</span>
+                                  <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                                    {formatISOToTime(s.start)} - {s.end ? formatISOToTime(s.end) : 'Ongoing'} ({deduction.netDeductedMinutes}m deducted{deduction.lunchOverlapMinutes > 0 ? `, lunch excluded` : ''})
+                                  </span>
+                                </div>
+                                <button
+                                  type="button"
+                                  className={styles.btnDeleteBreak}
+                                  onClick={() => handleRemoveModalShortLeave(idx)}
+                                >
+                                  ✕ Remove
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      <div className={styles.addBreakForm}>
+                        <div style={{ display: 'flex', gap: '0.4rem', width: '100%', marginBottom: '0.4rem' }}>
+                          <select
+                            className={styles.formInputMini}
+                            value={newShortLeaveReason}
+                            onChange={(e) => setNewShortLeaveReason(e.target.value)}
+                            style={{ flex: 1, padding: '0.35rem 0.5rem', background: 'rgba(255,255,255,0.05)', color: '#fff', border: '1px solid var(--border-color)', borderRadius: '6px' }}
+                          >
+                            <option value="Bank Work" style={{ background: '#1e293b' }}>🏦 Bank Work</option>
+                            <option value="Document Work" style={{ background: '#1e293b' }}>📄 Document Work</option>
+                            <option value="Home Work" style={{ background: '#1e293b' }}>🏠 Home Work</option>
+                            <option value="Personal Work" style={{ background: '#1e293b' }}>🏃 Personal Work</option>
+                            <option value="Other Work" style={{ background: '#1e293b' }}>📌 Other Work</option>
+                          </select>
+                        </div>
+                        <div className={styles.addBreakInputs}>
+                          <div className={styles.addBreakInputGroup}>
+                            <span className={styles.addBreakLabel}>Start:</span>
+                            <input
+                              type="time"
+                              className={styles.formInputMini}
+                              value={newShortLeaveStart}
+                              onChange={(e) => setNewShortLeaveStart(e.target.value)}
+                            />
+                          </div>
+                          <div className={styles.addBreakInputGroup}>
+                            <span className={styles.addBreakLabel}>End:</span>
+                            <input
+                              type="time"
+                              className={styles.formInputMini}
+                              value={newShortLeaveEnd}
+                              onChange={(e) => setNewShortLeaveEnd(e.target.value)}
+                            />
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className={`${styles.btn} ${styles.btnSecondary} ${styles.btnAddBreak}`}
+                          onClick={handleAddModalShortLeave}
+                        >
+                          + Add Short Leave
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </>
               )}
@@ -2889,6 +3251,144 @@ export default function Home() {
                   onClick={handleSaveManualBreak}
                 >
                   Save Break
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Short Leave Modal */}
+      {showShortLeaveModal && (
+        <div className={styles.modalOverlay} onClick={() => setShowShortLeaveModal(false)}>
+          <div className={`${styles.glass} ${styles.modalContent}`} style={{ maxWidth: '440px' }} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.modalHeader}>
+              <h3>🚗 Add Short Leave</h3>
+              <button className={styles.modalCloseBtn} onClick={() => setShowShortLeaveModal(false)}>✕</button>
+            </div>
+            <div style={{ padding: '1.5rem' }}>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: '0.85rem', fontSize: '0.88rem', lineHeight: '1.4' }}>
+                Log temporary leave for personal/official work. <strong style={{ color: '#fbbf24' }}>This duration is deducted from your work hours.</strong>
+              </p>
+
+              {/* Reason Selector Chips */}
+              <label className={styles.formLabel}>Reason for Leave</label>
+              <div className={styles.reasonChipsRow}>
+                {[
+                  { key: 'Bank Work', label: '🏦 Bank Work' },
+                  { key: 'Document Work', label: '📄 Document Work' },
+                  { key: 'Home Work', label: '🏠 Home Work' },
+                  { key: 'Personal Work', label: '🏃 Personal Work' },
+                  { key: 'Custom', label: '✏️ Other / Custom' },
+                ].map((r) => (
+                  <button
+                    key={r.key}
+                    type="button"
+                    className={`${styles.reasonChip} ${shortLeaveReason === r.key ? styles.reasonChipActive : ''}`}
+                    onClick={() => setShortLeaveReason(r.key)}
+                  >
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+
+              {shortLeaveReason === 'Custom' && (
+                <div className={styles.formGroup} style={{ marginBottom: '1rem' }}>
+                  <input
+                    type="text"
+                    className={styles.formInput}
+                    placeholder="Enter reason (e.g., Hospital, Car service, Govt office)..."
+                    value={customShortLeaveReason}
+                    onChange={(e) => setCustomShortLeaveReason(e.target.value)}
+                  />
+                </div>
+              )}
+
+              {/* Quick Fill Times */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Quick Fill:</span>
+                {[15, 30, 45, 60].map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    className={styles.quickBreakPresetChip}
+                    onClick={() => {
+                      const now = new Date();
+                      const start = new Date(now.getTime() - m * 60000);
+                      const pad = (n: number) => n.toString().padStart(2, '0');
+                      setShortLeaveStart(`${pad(start.getHours())}:${pad(start.getMinutes())}`);
+                      setShortLeaveEnd(`${pad(now.getHours())}:${pad(now.getMinutes())}`);
+                    }}
+                    title={`Fill last ${m} minutes`}
+                  >
+                    Last {m}m
+                  </button>
+                ))}
+              </div>
+
+              <div className={styles.formGroup}>
+                <label className={styles.formLabel}>Leave Start Time</label>
+                <input
+                  type="time"
+                  className={styles.formInput}
+                  value={shortLeaveStart}
+                  onChange={(e) => setShortLeaveStart(e.target.value)}
+                />
+              </div>
+
+              <div className={styles.formGroup}>
+                <label className={styles.formLabel}>Leave End Time</label>
+                <input
+                  type="time"
+                  className={styles.formInput}
+                  value={shortLeaveEnd}
+                  onChange={(e) => setShortLeaveEnd(e.target.value)}
+                />
+              </div>
+
+              {shortLeaveStart && shortLeaveEnd && (() => {
+                const todayStrLocal = getTodayDateString();
+                const deduction = calculateShortLeaveDeduction(todayStrLocal, shortLeaveStart, shortLeaveEnd);
+                if (deduction.grossMinutes > 0) return (
+                  <div style={{ padding: '0.85rem', background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.25)', borderRadius: '8px', marginBottom: '1rem', display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+                      <span>Total Time Away:</span>
+                      <strong style={{ color: 'var(--text-primary)' }}>{deduction.grossMinutes}m ({parseFloat((deduction.grossMinutes / 60).toFixed(2))}h)</strong>
+                    </div>
+                    {deduction.lunchOverlapMinutes > 0 && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#10b981' }}>
+                        <span>Lunch Break (1:00 - 2:00 PM):</span>
+                        <strong>-{deduction.lunchOverlapMinutes}m (Not counted as pending)</strong>
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', fontWeight: 700, color: '#fbbf24', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '5px', marginTop: '2px' }}>
+                      <span>Counted as Pending Work:</span>
+                      <span>{deduction.netDeductedMinutes}m ({parseFloat((deduction.netDeductedMinutes / 60).toFixed(2))}h)</span>
+                    </div>
+                  </div>
+                );
+                return null;
+              })()}
+
+              <div className={styles.modalFooter}>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnSecondary}`}
+                  onClick={() => {
+                    setShortLeaveStart('');
+                    setShortLeaveEnd('');
+                    setCustomShortLeaveReason('');
+                    setShowShortLeaveModal(false);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnPrimary}`}
+                  onClick={handleSaveShortLeave}
+                >
+                  Save Short Leave
                 </button>
               </div>
             </div>

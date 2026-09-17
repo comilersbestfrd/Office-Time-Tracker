@@ -3,6 +3,12 @@ export interface RecordSession {
   end: string | null; // ISO string, null if active
 }
 
+export interface ShortLeaveSession {
+  start: string; // ISO string
+  end: string | null; // ISO string, null if active
+  reason: string; // e.g., "Bank Work", "Document Work", "Home Work", etc.
+}
+
 export interface DayRecord {
   date: string; // YYYY-MM-DD
   status: 'present' | 'absent' | 'weekly-off' | 'holiday';
@@ -11,6 +17,10 @@ export interface DayRecord {
   restSessions: RecordSession[];
   restTimeTotal: number; // in minutes (completed sessions)
   activeRestStart: string | null; // ISO string if currently resting
+  shortLeaveSessions?: ShortLeaveSession[];
+  shortLeaveTotal?: number; // in minutes (completed short leave sessions)
+  activeShortLeaveStart?: string | null; // ISO string if currently on short leave
+  activeShortLeaveReason?: string | null;
   workedHours: number; // calculated hours
   pendingHours: number; // calculated pending hours
   earlyTime?: number; // in minutes (punched in before 09:00 AM)
@@ -33,6 +43,34 @@ export interface DashboardStats {
   requiredHoursTotal: number;// Expected hours (totalWorkDays * 8)
   hoursWorkedTotal: number;  // Hours actually worked
   pendingHoursTotal: number; // requiredHoursTotal - hoursWorkedTotal
+}
+
+// Helper to calculate Short Leave duration and net deduction excluding 1:00 PM - 2:00 PM lunch break
+export function calculateShortLeaveDeduction(
+  dateStr: string,
+  startIsoOrTime: string,
+  endIsoOrTime: string
+): { grossMinutes: number; lunchOverlapMinutes: number; netDeductedMinutes: number } {
+  const getFullIso = (t: string) => (t.includes('T') ? t : `${dateStr}T${t}:00`);
+  const s = new Date(getFullIso(startIsoOrTime)).getTime();
+  const e = new Date(getFullIso(endIsoOrTime)).getTime();
+  if (isNaN(s) || isNaN(e) || e <= s) {
+    return { grossMinutes: 0, lunchOverlapMinutes: 0, netDeductedMinutes: 0 };
+  }
+  const grossMinutes = Math.round((e - s) / 60000);
+
+  const lunchStart = new Date(`${dateStr}T13:00:00`).getTime();
+  const lunchEnd = new Date(`${dateStr}T14:00:00`).getTime();
+
+  const overlapStart = Math.max(s, lunchStart);
+  const overlapEnd = Math.min(e, lunchEnd);
+  let lunchOverlapMinutes = 0;
+  if (overlapEnd > overlapStart) {
+    lunchOverlapMinutes = Math.round((overlapEnd - overlapStart) / 60000);
+  }
+
+  const netDeductedMinutes = Math.max(0, grossMinutes - lunchOverlapMinutes);
+  return { grossMinutes, lunchOverlapMinutes, netDeductedMinutes };
 }
 
 // Calculate hours for a single day record
@@ -125,8 +163,51 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
   const excessRestMinutes = Math.max(0, totalRestMinutes - allowedRest);
   const excessRestMs = excessRestMinutes * 60 * 1000;
 
-  // Work time = (elapsed work time after 9:00 AM - lunch break - excess break time)
-  const netWorkedMs = Math.max(0, elapsedMs - lunchOverlapMs - excessRestMs);
+  // Calculate Short Leave Deduction (Not counted as work time)
+  // Each short leave session during shift is subtracted from worked time.
+  // To avoid double-deducting time that falls within the 1:00 PM - 2:00 PM lunch window (which is already deducted by lunchOverlapMs):
+  let shortLeaveDeductionMs = 0;
+  const allShortLeaves: ShortLeaveSession[] = [...(record.shortLeaveSessions || [])];
+  if (record.activeShortLeaveStart) {
+    const endIso = record.outTime || (nowStr || new Date().toISOString());
+    allShortLeaves.push({
+      start: record.activeShortLeaveStart,
+      end: endIso,
+      reason: record.activeShortLeaveReason || 'Short Leave',
+    });
+  }
+
+  let totalNetShortLeaveMins = 0;
+  allShortLeaves.forEach((s) => {
+    if (!s.start) return;
+    const sStart = new Date(s.start).getTime();
+    const sEnd = s.end ? new Date(s.end).getTime() : (record.outTime ? new Date(record.outTime).getTime() : new Date().getTime());
+    if (sEnd > sStart) {
+      // Exclude lunch break (1:00 PM - 2:00 PM) from short leave minutes
+      const lunchOverlapStart = Math.max(sStart, lunchStart.getTime());
+      const lunchOverlapEnd = Math.min(sEnd, lunchEnd.getTime());
+      const lunchOverlap = Math.max(0, lunchOverlapEnd - lunchOverlapStart);
+      const netLeaveMs = Math.max(0, (sEnd - sStart) - lunchOverlap);
+      totalNetShortLeaveMins += netLeaveMs / 60000;
+
+      // Net deduction within work window [effectiveStartTime, outTime]
+      const winStart = Math.max(effectiveStartTime.getTime(), sStart);
+      const winEnd = Math.min(outTime.getTime(), sEnd);
+      if (winEnd > winStart) {
+        let spanMs = winEnd - winStart;
+        // Check overlap with lunch break [lunchStart, lunchEnd]
+        const lunchWinStart = Math.max(winStart, lunchStart.getTime());
+        const lunchWinEnd = Math.min(winEnd, lunchEnd.getTime());
+        if (lunchWinEnd > lunchWinStart) {
+          spanMs -= (lunchWinEnd - lunchWinStart);
+        }
+        shortLeaveDeductionMs += Math.max(0, spanMs);
+      }
+    }
+  });
+
+  // Work time = (elapsed work time after 9:00 AM - lunch break - excess break time - short leave deduction)
+  const netWorkedMs = Math.max(0, elapsedMs - lunchOverlapMs - excessRestMs - shortLeaveDeductionMs);
   const workedHours = netWorkedMs / (1000 * 60 * 60);
   const pendingHours = 8 - workedHours;
 
@@ -136,6 +217,7 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
     isAutoClockedOut,
     earlyTime: parseFloat(earlyMinutes.toFixed(2)),
     lunchDeduction: parseFloat(lunchDeductionMinutes.toFixed(2)),
+    shortLeaveTotal: Math.round(totalNetShortLeaveMins),
     workedHours: parseFloat(workedHours.toFixed(2)),
     pendingHours: parseFloat(pendingHours.toFixed(2)),
   };
