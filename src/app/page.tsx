@@ -1854,106 +1854,106 @@ export default function Home() {
       return;
     }
 
-    const effectiveHolidayType = modalHolidayType !== 'none' ? modalHolidayType : undefined;
+    const existingHoliday = holidays.find((h) => h.date === modalDate);
+    const existingRec = records.find((r) => r.date === modalDate);
+    const effectiveHolidayType = existingRec?.holidayType || existingHoliday?.type || (modalHolidayType !== 'none' ? modalHolidayType : undefined);
     const isHalfDay = effectiveHolidayType === 'half-before-lunch' || effectiveHolidayType === 'half-after-lunch';
-    const isFullHoliday = effectiveHolidayType === 'full' || (!effectiveHolidayType && modalStatus === 'holiday');
+    const isFullHoliday = effectiveHolidayType === 'full' || (!effectiveHolidayType && !!existingHoliday);
     const targetRequired = isHalfDay ? 4 : (isFullHoliday ? 0 : 8);
 
     let record: DayRecord = {
       date: modalDate,
-      status: modalStatus,
+      status: 'present',
       holidayType: effectiveHolidayType,
       inTime: null,
       outTime: null,
-      restSessions: [],
-      restTimeTotal: 0,
+      restSessions: modalRestSessions,
+      restTimeTotal: modalRestTime,
       activeRestStart: null,
-      shortLeaveSessions: [],
+      shortLeaveSessions: modalShortLeaveSessions,
       shortLeaveTotal: 0,
       activeShortLeaveStart: null,
       workedHours: 0,
-      pendingHours: modalStatus === 'absent' ? targetRequired : 0,
+      pendingHours: 0,
       notes: modalNotes,
       isLateApproved: modalIsLateApproved,
       lateReason: modalLateReason,
     };
 
-    if (modalStatus === 'present') {
-      const localInStr = `${modalDate}T${modalInTime}:00`;
-      const inDate = new Date(localInStr);
+    const localInStr = `${modalDate}T${modalInTime}:00`;
+    const inDate = new Date(localInStr);
 
-      // Validation: No future times allowed
-      if (inDate.getTime() > today.getTime()) {
-        alert("Clock-in time cannot be in the future!");
-        return;
-      }
-
-      // Enforce minimum In time: 8:00 AM
-      if (inDate.getHours() < 8) {
-        alert('In-Time cannot be before 8:00 AM!');
-        return;
-      }
-
-      record.inTime = inDate.toISOString();
-
-      if (modalOutTime) {
-        const localOutStr = `${modalDate}T${modalOutTime}:00`;
-        let outDate = new Date(localOutStr);
-
-        // Handle overnight shift if Out Time is smaller than In Time
-        if (outDate.getTime() < inDate.getTime()) {
-          outDate.setDate(outDate.getDate() + 1);
-        }
-
-        // Enforce maximum Out time: 8:00 PM (20:00)
-        if (outDate.getHours() >= 20 && outDate.getMinutes() > 0 || outDate.getHours() > 20) {
-          alert('Out-Time cannot be after 8:00 PM!');
-          return;
-        }
-
-        record.outTime = outDate.toISOString();
-      } else {
-        // If it's a past date, outTime is required!
-        if (modalDate < todayStrLocal) {
-          alert("Out Time is required for past dates!");
-          return;
-        }
-        record.outTime = null;
-      }
-
-      const existingRecord = records.find((r) => r.date === modalDate);
-      record.activeRestStart = existingRecord ? existingRecord.activeRestStart : null;
-      record.activeShortLeaveStart = existingRecord ? existingRecord.activeShortLeaveStart : null;
-      record.activeShortLeaveReason = existingRecord ? existingRecord.activeShortLeaveReason : null;
-      record.allowedRestLimit = existingRecord?.allowedRestLimit !== undefined ? existingRecord.allowedRestLimit : defaultDailyRestLimit;
-
-      if (modalRestSessions.length > 0) {
-        record.restSessions = modalRestSessions;
-        record.restTimeTotal = modalRestTime;
-      } else if (modalRestTime > 0) {
-        record.restTimeTotal = modalRestTime;
-        // Synthesize a single rest session representing manual rest input
-        record.restSessions = [
-          {
-            start: new Date(inDate.getTime() + 60000).toISOString(),
-            end: new Date(inDate.getTime() + (modalRestTime + 1) * 60000).toISOString(),
-          },
-        ];
-      } else {
-        record.restSessions = [];
-        record.restTimeTotal = 0;
-      }
-
-      // Short Leave Sessions from Modal
-      record.shortLeaveSessions = modalShortLeaveSessions;
-      let totalShortLeaveMins = 0;
-      modalShortLeaveSessions.forEach((s) => {
-        if (s.end) {
-          totalShortLeaveMins += (new Date(s.end).getTime() - new Date(s.start).getTime()) / 60000;
-        }
-      });
-      record.shortLeaveTotal = Math.round(totalShortLeaveMins);
+    // Validation: No future times allowed
+    if (inDate.getTime() > today.getTime()) {
+      alert("Clock-in time cannot be in the future!");
+      return;
     }
+
+    // Enforce minimum In time: 8:00 AM
+    if (inDate.getHours() < 8) {
+      alert('In-Time cannot be before 8:00 AM!');
+      return;
+    }
+
+    record.inTime = inDate.toISOString();
+
+    if (modalOutTime) {
+      const localOutStr = `${modalDate}T${modalOutTime}:00`;
+      let outDate = new Date(localOutStr);
+
+      // Handle overnight shift if Out Time is smaller than In Time
+      if (outDate.getTime() < inDate.getTime()) {
+        outDate.setDate(outDate.getDate() + 1);
+      }
+
+      // Enforce maximum Out time: 8:00 PM (20:00)
+      if ((outDate.getHours() >= 20 && outDate.getMinutes() > 0) || outDate.getHours() > 20) {
+        alert('Out-Time cannot be after 8:00 PM!');
+        return;
+      }
+
+      record.outTime = outDate.toISOString();
+    } else {
+      // If it's a past date, outTime is required!
+      if (modalDate < todayStrLocal) {
+        alert("Out Time is required for past dates!");
+        return;
+      }
+      record.outTime = null;
+    }
+
+    const existingRecord = records.find((r) => r.date === modalDate);
+    record.activeRestStart = existingRecord ? existingRecord.activeRestStart : null;
+    record.activeShortLeaveStart = existingRecord ? existingRecord.activeShortLeaveStart : null;
+    record.activeShortLeaveReason = existingRecord ? existingRecord.activeShortLeaveReason : null;
+    record.allowedRestLimit = existingRecord?.allowedRestLimit !== undefined ? existingRecord.allowedRestLimit : defaultDailyRestLimit;
+
+    if (modalRestSessions.length > 0) {
+      record.restSessions = modalRestSessions;
+      record.restTimeTotal = modalRestTime;
+    } else if (modalRestTime > 0) {
+      record.restTimeTotal = modalRestTime;
+      // Synthesize a single rest session representing manual rest input
+      record.restSessions = [
+        {
+          start: new Date(inDate.getTime() + 60000).toISOString(),
+          end: new Date(inDate.getTime() + (modalRestTime + 1) * 60000).toISOString(),
+        },
+      ];
+    } else {
+      record.restSessions = [];
+      record.restTimeTotal = 0;
+    }
+
+    // Short Leave Sessions from Modal
+    record.shortLeaveSessions = modalShortLeaveSessions;
+    let totalShortLeaveMins = 0;
+    modalShortLeaveSessions.forEach((s) => {
+      if (s.end) {
+        totalShortLeaveMins += (new Date(s.end).getTime() - new Date(s.start).getTime()) / 60000;
+      }
+    });
+    record.shortLeaveTotal = Math.round(totalShortLeaveMins);
 
     await saveRecordApi(record);
     setShowModal(false);
@@ -3152,35 +3152,54 @@ export default function Home() {
             </div>
 
             <form onSubmit={handleSaveModal}>
-              <div className={styles.formGroup}>
-                <label className={styles.formLabel}>Status</label>
-                <select
-                  className={styles.formSelect}
-                  value={modalStatus}
-                  onChange={(e) => setModalStatus(e.target.value as any)}
-                >
-                  <option value="present">Present</option>
-                  <option value="absent">Absent</option>
-                  <option value="weekly-off">Weekly Off (Sunday)</option>
-                  <option value="holiday">Public Holiday</option>
-                </select>
-              </div>
-
-              <div className={styles.formGroup}>
-                <label className={styles.formLabel}>Holiday / Half Leave Type</label>
-                <select
-                  className={styles.formSelect}
-                  value={modalHolidayType}
-                  onChange={(e) => setModalHolidayType(e.target.value as any)}
-                >
-                  <option value="none">Regular Working Day (8h standard · Shift 9 AM - 6 PM)</option>
-                  <option value="half-after-lunch">🌓 Official Half Day - After Lunch (Shift 9 AM - 1 PM · 4h · Extra time covers leave)</option>
-                  <option value="half-before-lunch">🌓 Official Half Day - Before Lunch (Shift 2 PM - 6 PM · 4h · Extra time covers leave)</option>
-                  <option value="full">🎉 Full Day Holiday (0h required)</option>
-                </select>
-              </div>
-
-              {modalStatus === 'present' && (
+              {modalHolidayType && modalHolidayType !== 'none' ? (
+                <div style={{
+                  marginBottom: '1.25rem',
+                  padding: '0.75rem 1rem',
+                  borderRadius: '10px',
+                  background: 'rgba(245, 158, 11, 0.1)',
+                  border: '1px solid rgba(245, 158, 11, 0.25)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.65rem',
+                  color: '#fbbf24',
+                  fontSize: '0.88rem'
+                }}>
+                  <span style={{ fontSize: '1.25rem' }}>🌓</span>
+                  <div>
+                    <strong>
+                      {modalHolidayType === 'half-after-lunch'
+                        ? 'Official Half Day (After Lunch)'
+                        : modalHolidayType === 'half-before-lunch'
+                        ? 'Official Half Day (Before Lunch)'
+                        : 'Official Public Holiday'}
+                    </strong>
+                    <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginTop: '2px' }}>
+                      {modalHolidayType === 'half-after-lunch'
+                        ? 'Official Shift: 9:00 AM - 1:00 PM (4h required). Any time past 1:00 PM covers monthly leave hours.'
+                        : modalHolidayType === 'half-before-lunch'
+                        ? 'Official Shift: 2:00 PM - 6:00 PM (4h required). Any time past 6:00 PM covers monthly leave hours.'
+                        : '0h required (Full Day Public Holiday).'}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{
+                  marginBottom: '1.25rem',
+                  padding: '0.65rem 0.95rem',
+                  borderRadius: '10px',
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: '1px solid rgba(255, 255, 255, 0.07)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                  color: '#94a3b8',
+                  fontSize: '0.85rem'
+                }}>
+                  <span>🕒</span>
+                  <span>Official Shift: <strong>9:00 AM - 6:00 PM</strong> (8h required)</span>
+                </div>
+              )}
                 <>
                   <div className={styles.formRow}>
                     <div className={styles.formGroup} style={{ marginBottom: 0 }}>
@@ -3397,7 +3416,6 @@ export default function Home() {
                     </div>
                   </div>
                 </>
-              )}
 
               <div className={styles.formGroup}>
                 <label className={styles.formLabel}>Notes (Optional)</label>
@@ -3410,17 +3428,15 @@ export default function Home() {
                 />
               </div>
 
-              {modalStatus === 'present' && (
-                <div className={styles.manualNote}>
-                  💡 <strong>Calculation Note:</strong> {modalHolidayType === 'half-after-lunch' ? (
-                    <>Half Day Shift (9:00 AM - 1:00 PM, 4h required). Lunch break is <strong>NOT</strong> deducted. Any extra time worked after 1:00 PM (e.g. leaving at 1:45 PM) counts as 45m post-shift cover time and deducts directly from your monthly leave hours.</>
-                  ) : modalHolidayType === 'half-before-lunch' ? (
-                    <>Half Day Shift (2:00 PM - 6:00 PM, 4h required). Lunch break is <strong>NOT</strong> deducted. Any extra time worked past 6:00 PM deducts directly from your monthly leave hours.</>
-                  ) : (
-                    <>Net work hours will be calculated as <code>(Clock Out - Clock In) - (Lunch Break overlap, max 1h) - Math.max(0, Rest Time - 20 minutes)</code>.</>
-                  )}
-                </div>
-              )}
+              <div className={styles.manualNote}>
+                💡 <strong>Calculation Note:</strong> {modalHolidayType === 'half-after-lunch' ? (
+                  <>Half Day Shift (9:00 AM - 1:00 PM, 4h required). Lunch break is <strong>NOT</strong> deducted. Any extra time worked after 1:00 PM (e.g. leaving at 1:45 PM) counts as 45m post-shift cover time and deducts directly from your monthly leave hours.</>
+                ) : modalHolidayType === 'half-before-lunch' ? (
+                  <>Half Day Shift (2:00 PM - 6:00 PM, 4h required). Lunch break is <strong>NOT</strong> deducted. Any extra time worked past 6:00 PM deducts directly from your monthly leave hours.</>
+                ) : (
+                  <>Net work hours will be calculated as <code>(Clock Out - Clock In) - (Lunch Break overlap, max 1h) - Math.max(0, Rest Time - 20 minutes)</code>.</>
+                )}
+              </div>
 
               <div className={styles.modalFooter}>
                 <button
