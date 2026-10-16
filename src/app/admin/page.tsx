@@ -73,7 +73,8 @@ export default function AdminDashboard() {
   const [holidays, setHolidays] = useState<Holiday[]>([]);
   const [holidayDateInput, setHolidayDateInput] = useState('');
   const [holidayNameInput, setHolidayNameInput] = useState('');
-  const [holidayTypeInput, setHolidayTypeInput] = useState<HolidayType>('full');
+  const [holidayTypeInput, setHolidayTypeInput] = useState<HolidayType>('half-after-lunch');
+  const [holidayScopeInput, setHolidayScopeInput] = useState<string>('all');
 
   // Load user profiles
   useEffect(() => {
@@ -262,39 +263,106 @@ export default function AdminDashboard() {
   const handleAddHoliday = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!holidayDateInput || !holidayNameInput.trim()) {
-      alert('Please specify both Date and Holiday Name!');
+      alert('Please specify both Date and Leave / Holiday Name!');
       return;
     }
-    const holiday: Holiday = {
-      date: holidayDateInput,
-      name: holidayNameInput.trim(),
-      type: holidayTypeInput,
-    };
 
-    // Update local state instantly for immediate UI feedback
-    setHolidays((prev) => {
-      const filtered = prev.filter((h) => h.date !== holiday.date);
-      return [...filtered, holiday].sort((a, b) => b.date.localeCompare(a.date));
-    });
+    if (holidayScopeInput === 'all') {
+      // Company-wide Holiday / Official Leave
+      const holiday: Holiday = {
+        date: holidayDateInput,
+        name: holidayNameInput.trim(),
+        type: holidayTypeInput,
+      };
 
-    try {
-      // Write to Firebase
-      const holidayRef = ref(db, `holidays/${holiday.date}`);
-      await set(holidayRef, holiday);
-      
-      // Sync to local JSON database API
-      await fetch('/api/holidays', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(holiday),
+      // Update local state instantly for immediate UI feedback
+      setHolidays((prev) => {
+        const filtered = prev.filter((h) => h.date !== holiday.date);
+        return [...filtered, holiday].sort((a, b) => b.date.localeCompare(a.date));
       });
 
-      setHolidayDateInput('');
-      setHolidayNameInput('');
-      setHolidayTypeInput('full');
+      try {
+        // Write to Firebase
+        const holidayRef = ref(db, `holidays/${holiday.date}`);
+        await set(holidayRef, holiday);
+        
+        // Sync to local JSON database API
+        await fetch('/api/holidays', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(holiday),
+        });
+
+        alert(`Company-wide Official Leave/Holiday (${holidayTypeInput}) saved for ${holidayDateInput}!`);
+        setHolidayDateInput('');
+        setHolidayNameInput('');
+      } catch (err: any) {
+        console.error('Error saving holiday:', err);
+        alert(`Failed to save holiday: ${err.message}`);
+      }
+    } else {
+      // Specific Employee Official Half Day Leave
+      const targetUid = holidayScopeInput;
+      const targetUser = allUsersData.find((u) => u.uid === targetUid);
+      const existingRec = (rawUsersMap[targetUid] || []).find((r) => r.date === holidayDateInput);
+      const matchingHoliday = holidays.find((h) => h.date === holidayDateInput);
+
+      const isHalf = holidayTypeInput.startsWith('half');
+      const targetRecord: DayRecord = existingRec
+        ? {
+            ...existingRec,
+            holidayType: holidayTypeInput,
+            notes: existingRec.notes ? `${existingRec.notes} | Official: ${holidayNameInput}` : `Official: ${holidayNameInput}`,
+          }
+        : {
+            date: holidayDateInput,
+            status: 'holiday',
+            holidayType: holidayTypeInput,
+            inTime: null,
+            outTime: null,
+            restSessions: [],
+            restTimeTotal: 0,
+            activeRestStart: null,
+            workedHours: 0,
+            pendingHours: isHalf ? 4 : 0,
+            notes: `Official: ${holidayNameInput}`,
+          };
+
+      const recalculated = calculateRecordHours(targetRecord, undefined, undefined, matchingHoliday);
+
+      try {
+        await set(ref(db, `records/${targetUid}/${holidayDateInput}`), recalculated);
+        alert(`Official Leave (${holidayTypeInput}) successfully granted to ${getUserLabel(targetUid)} for ${holidayDateInput}!`);
+        setHolidayDateInput('');
+        setHolidayNameInput('');
+      } catch (err: any) {
+        console.error('Error saving user leave:', err);
+        alert(`Failed to save user leave: ${err.message}`);
+      }
+    }
+  };
+
+  const handleCycleHalfDay = async (uid: string, record: DayRecord) => {
+    // Cycle: None/Full -> half-after-lunch (9 AM - 1 PM) -> half-before-lunch (2 PM - 6 PM) -> None
+    let nextType: HolidayType | undefined;
+    if (!record.holidayType || record.holidayType === 'full') {
+      nextType = 'half-after-lunch';
+    } else if (record.holidayType === 'half-after-lunch') {
+      nextType = 'half-before-lunch';
+    } else {
+      nextType = undefined;
+    }
+
+    const matchingHoliday = holidays.find((h) => h.date === record.date);
+    const updated: DayRecord = {
+      ...record,
+      holidayType: nextType,
+    };
+    const recalculated = calculateRecordHours(updated, undefined, undefined, matchingHoliday);
+    try {
+      await set(ref(db, `records/${uid}/${record.date}`), recalculated);
     } catch (err: any) {
-      console.error('Error saving holiday:', err);
-      alert(`Failed to save holiday: ${err.message}`);
+      alert(`Failed to update leave type: ${err.message}`);
     }
   };
 
@@ -393,15 +461,19 @@ export default function AdminDashboard() {
         </div>
       </div>
 
-      {/* Holidays Management */}
+      {/* Holidays & Official Leaves Management */}
       <div className={styles.userSection} style={{ padding: '1.5rem', marginBottom: '2rem' }}>
-        <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: '1rem', borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: '0.5rem' }}>
-          📅 Manage Public Holidays
+        <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: '0.4rem', borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: '0.5rem' }}>
+          📅 Manage Holidays & Official Half Day Leaves
         </h2>
+        <p style={{ color: '#94a3b8', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
+          Declare official full-day or half-day leaves company-wide or assign official half-day leave to an individual employee. 
+          For <strong>After Lunch</strong> leave (Shift 9 AM - 1 PM), any extra time worked past 1:00 PM (e.g. leaving at 1:45 PM) counts as cover time and deducts directly from monthly leave hours.
+        </p>
         
         <form onSubmit={handleAddHoliday} style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: '1.5rem' }}>
           <div className={styles.filterGroup}>
-            <label>Holiday Date</label>
+            <label>Leave / Holiday Date</label>
             <input
               type="date"
               value={holidayDateInput}
@@ -410,11 +482,11 @@ export default function AdminDashboard() {
               required
             />
           </div>
-          <div className={styles.filterGroup} style={{ flex: '1', minWidth: '200px' }}>
-            <label>Holiday Name</label>
+          <div className={styles.filterGroup} style={{ flex: '1', minWidth: '180px' }}>
+            <label>Title / Reason</label>
             <input
               type="text"
-              placeholder="e.g. Independence Day / Diwali"
+              placeholder="e.g. Official Half Day / Diwali"
               value={holidayNameInput}
               onChange={(e) => setHolidayNameInput(e.target.value)}
               className={styles.dateInput}
@@ -422,21 +494,37 @@ export default function AdminDashboard() {
               required
             />
           </div>
-          <div className={styles.filterGroup} style={{ minWidth: '220px' }}>
-            <label>Holiday / Leave Type</label>
+          <div className={styles.filterGroup} style={{ minWidth: '240px' }}>
+            <label>Leave Type</label>
             <select
               value={holidayTypeInput}
               onChange={(e) => setHolidayTypeInput(e.target.value as HolidayType)}
               className={styles.selectInput}
               style={{ width: '100%' }}
             >
-              <option value="full">Full Day Holiday</option>
-              <option value="half-before-lunch">Half Leave (Before Lunch)</option>
-              <option value="half-after-lunch">Half Leave (After Lunch)</option>
+              <option value="half-after-lunch">🌓 Half Leave (After Lunch: Shift 9 AM - 1 PM)</option>
+              <option value="half-before-lunch">🌓 Half Leave (Before Lunch: Shift 2 PM - 6 PM)</option>
+              <option value="full">🎉 Full Day Holiday / Leave</option>
+            </select>
+          </div>
+          <div className={styles.filterGroup} style={{ minWidth: '200px' }}>
+            <label>Applies To</label>
+            <select
+              value={holidayScopeInput}
+              onChange={(e) => setHolidayScopeInput(e.target.value)}
+              className={styles.selectInput}
+              style={{ width: '100%' }}
+            >
+              <option value="all">🌐 All Employees (Company-Wide)</option>
+              {allUsersData.map((u) => (
+                <option key={u.uid} value={u.uid}>
+                  👤 {getUserLabel(u.uid)}
+                </option>
+              ))}
             </select>
           </div>
           <button type="submit" className={styles.btnPrimary} style={{ padding: '0.65rem 1.5rem', borderRadius: '8px' }}>
-            ➕ Add Holiday
+            ➕ Add Leave / Holiday
           </button>
         </form>
 
@@ -569,7 +657,7 @@ export default function AdminDashboard() {
                       <th>Break (min)</th>
                       <th>Lunch (min)</th>
                       <th>Late (Salary Cut)</th>
-                      <th>After 6 PM (Leave Cover)</th>
+                      <th>Post-Shift / Leave Cover</th>
                       <th>Worked (hh:mm)</th>
                       <th>Pending (hh:mm)</th>
                       <th>Notes</th>
@@ -626,8 +714,15 @@ export default function AdminDashboard() {
                         <td>
                           {rec.status === 'present' && rec.date >= NEW_POLICY_START_DATE ? (
                             rec.afterSixMinutes && rec.afterSixMinutes > 0 ? (
-                              <span className={`${styles.statusBadge} ${styles.badgeCover}`} title="Time past 6 PM deducts from monthly leave hours">
-                                🌙 +{rec.afterSixMinutes}m ({rec.leaveCoverMinutes || 0}m Cover)
+                              <span
+                                className={`${styles.statusBadge} ${styles.badgeCover}`}
+                                title={
+                                  rec.holidayType === 'half-after-lunch'
+                                    ? `Worked past 1:00 PM half-day shift: ${rec.afterSixMinutes}m (${rec.leaveCoverMinutes || 0}m deducts from leave hours)`
+                                    : `Worked past shift end: ${rec.afterSixMinutes}m (${rec.leaveCoverMinutes || 0}m deducts from leave hours)`
+                                }
+                              >
+                                {rec.holidayType === 'half-after-lunch' ? '🌓' : '🌙'} +{rec.afterSixMinutes}m ({rec.leaveCoverMinutes || 0}m Cover)
                               </span>
                             ) : (
                               '--'
@@ -642,6 +737,18 @@ export default function AdminDashboard() {
                         <td>{formatHoursToHHMM(rec.pendingHours)}</td>
                         <td className={styles.notesCell}>{rec.notes || '--'}</td>
                         <td style={{ whiteSpace: 'nowrap' }}>
+                          <button
+                            type="button"
+                            className={styles.btnSmallSecondary}
+                            onClick={() => handleCycleHalfDay(userData.uid, rec)}
+                            title="Toggle Official Half Day: None -> Half (After Lunch: 9 AM - 1 PM) -> Half (Before Lunch: 2 PM - 6 PM)"
+                          >
+                            {rec.holidayType === 'half-after-lunch'
+                              ? '🌓 Half (PM)'
+                              : rec.holidayType === 'half-before-lunch'
+                              ? '🌓 Half (AM)'
+                              : '🌓 Set Half'}
+                          </button>
                           {rec.status === 'present' && rec.date >= NEW_POLICY_START_DATE && rec.lateMinutes && rec.lateMinutes > 0 && (
                             <button
                               type="button"

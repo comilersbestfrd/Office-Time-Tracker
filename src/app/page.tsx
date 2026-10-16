@@ -45,6 +45,7 @@ export default function Home() {
 
   // Data States
   const [records, setRecords] = useState<DayRecord[]>([]);
+  const [rawFirebaseRecords, setRawFirebaseRecords] = useState<DayRecord[]>([]);
   const recordsRef = useRef<DayRecord[]>([]);
   const pipWindowRef = useRef<any>(null);
   const [holidays, setHolidays] = useState<Holiday[]>([]);
@@ -173,18 +174,21 @@ export default function Home() {
   // Fetch local data (when signed out / offline)
   const fetchLocalData = async () => {
     try {
+      const holidaysRes = await fetch('/api/holidays');
+      const holidaysData: Holiday[] = await holidaysRes.json();
+      setHolidays(holidaysData);
+
       const recordsRes = await fetch('/api/records');
       const recordsData: DayRecord[] = await recordsRes.json();
-      const recalculated = recordsData.map(r => calculateRecordHours(r, undefined, defaultDailyRestLimit));
+      const recalculated = recordsData.map((r) => {
+        const matchingHoliday = holidaysData.find((h) => h.date === r.date);
+        return calculateRecordHours(r, undefined, defaultDailyRestLimit, matchingHoliday);
+      });
       setRecords(recalculated);
 
       const statsRes = await fetch('/api/stats');
       const statsData: DashboardStats = await statsRes.json();
       setStats(statsData);
-
-      const holidaysRes = await fetch('/api/holidays');
-      const holidaysData: Holiday[] = await holidaysRes.json();
-      setHolidays(holidaysData);
     } catch (error) {
       console.error('Error fetching local data:', error);
     }
@@ -259,10 +263,9 @@ export default function Home() {
       const data = snapshot.val();
       if (data) {
         const list: DayRecord[] = Object.values(data);
-        const recalculated = list.map(r => calculateRecordHours(r, undefined, defaultDailyRestLimit));
-        const sorted = recalculated.sort((a, b) => a.date.localeCompare(b.date));
-        setRecords(sorted);
+        setRawFirebaseRecords(list);
       } else {
+        setRawFirebaseRecords([]);
         setRecords([]);
       }
     });
@@ -270,7 +273,22 @@ export default function Home() {
     return () => {
       unsubscribe();
     };
-  }, [user, defaultDailyRestLimit]);
+  }, [user]);
+
+  // Keep records recalculated with matching holidays whenever raw records, holidays, or rest limit change
+  useEffect(() => {
+    if (!user) return;
+    if (rawFirebaseRecords.length === 0) {
+      setRecords([]);
+      return;
+    }
+    const recalculated = rawFirebaseRecords.map((r) => {
+      const matchingHoliday = holidays.find((h) => h.date === r.date);
+      return calculateRecordHours(r, undefined, defaultDailyRestLimit, matchingHoliday);
+    });
+    const sorted = recalculated.sort((a, b) => a.date.localeCompare(b.date));
+    setRecords(sorted);
+  }, [rawFirebaseRecords, holidays, defaultDailyRestLimit, user]);
 
   // Listen to holidays in Firebase
   useEffect(() => {
@@ -2340,9 +2358,19 @@ export default function Home() {
 
             {todayRecord && todayRecord.status === 'present' && (
               <div style={{ marginTop: '0.65rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+                {todayRecord.holidayType === 'half-after-lunch' && (
+                  <span className={styles.badgeHalfLeave} title="Official Half Day (After Lunch): Shift 9:00 AM to 1:00 PM (4h). Time past 1:00 PM covers monthly leave hours.">
+                    🌓 Official Half Day (Shift: 9 AM - 1 PM)
+                  </span>
+                )}
+                {todayRecord.holidayType === 'half-before-lunch' && (
+                  <span className={styles.badgeHalfLeave} title="Official Half Day (Before Lunch): Shift 2:00 PM to 6:00 PM (4h).">
+                    🌓 Official Half Day (Shift: 2 PM - 6 PM)
+                  </span>
+                )}
                 {todayRecord.lateMinutes && todayRecord.lateMinutes > 0 ? (
                   todayRecord.isLateApproved ? (
-                    <span className={styles.badgeApproved} title="Approved late arrival - can be covered after 6:00 PM">
+                    <span className={styles.badgeApproved} title="Approved late arrival - can be covered after shift end">
                       ✅ {todayRecord.lateMinutes}m Late (Approved)
                     </span>
                   ) : (
@@ -2353,8 +2381,16 @@ export default function Home() {
                 ) : null}
 
                 {(liveAfterSixMins > 0 || (todayRecord.afterSixMinutes && todayRecord.afterSixMinutes > 0)) ? (
-                  <span className={styles.badgeCover} title="Time worked past 6:00 PM deducts from monthly leave hours">
-                    🌙 Past 6 PM: +{liveAfterSixMins || todayRecord.afterSixMinutes}m ({liveLeaveCoverMins || todayRecord.leaveCoverMinutes || 0}m Leave Cover)
+                  <span
+                    className={styles.badgeCover}
+                    title={
+                      todayRecord.holidayType === 'half-after-lunch'
+                        ? "Time worked past 1:00 PM half-day shift deducts from monthly leave hours"
+                        : "Time worked past 6:00 PM deducts from monthly leave hours"
+                    }
+                  >
+                    {todayRecord.holidayType === 'half-after-lunch' ? '🌓' : '🌙'}{' '}
+                    {todayRecord.holidayType === 'half-after-lunch' ? 'Past 1 PM' : 'Past 6 PM'}: +{liveAfterSixMins || todayRecord.afterSixMinutes}m ({liveLeaveCoverMins || todayRecord.leaveCoverMinutes || 0}m Leave Cover)
                   </span>
                 ) : null}
               </div>
@@ -2808,7 +2844,7 @@ export default function Home() {
               </div>
               <div className={styles.statSubtext}>
                 {displayStats.leaveCoverHoursTotal && displayStats.leaveCoverHoursTotal > 0
-                  ? `${displayStats.leaveHoursTotal || 0}h quota - ${Math.round((displayStats.leaveCoverHoursTotal || 0) * 60)}m covered after 6 PM`
+                  ? `${displayStats.leaveHoursTotal || 0}h quota - ${Math.round((displayStats.leaveCoverHoursTotal || 0) * 60)}m covered post-shift`
                   : filterEndDate && filterEndDate < NEW_POLICY_START_DATE
                   ? 'Previous month standard record'
                   : `${displayStats.leaveHoursTotal || 0}h leave quota (0m covered)`}
@@ -2974,7 +3010,7 @@ export default function Home() {
                     <th>Break Time</th>
                     <th>Lunch Break</th>
                     <th>Late (Salary Cut)</th>
-                    <th>After 6 PM (Leave Cover)</th>
+                    <th>Post-Shift / Leave Cover</th>
                     <th>Hours Worked</th>
                     <th>Actions</th>
                   </tr>
@@ -3061,8 +3097,15 @@ export default function Home() {
                           <td>
                             {record.status === 'present' && record.date >= NEW_POLICY_START_DATE ? (
                               record.afterSixMinutes && record.afterSixMinutes > 0 ? (
-                                <span className={styles.badgeCover} title="Time past 6 PM deducts from monthly leave hours">
-                                  🌙 +{record.afterSixMinutes}m ({record.leaveCoverMinutes || 0}m Cover)
+                                <span
+                                  className={styles.badgeCover}
+                                  title={
+                                    record.holidayType === 'half-after-lunch'
+                                      ? `Worked past 1:00 PM half-day shift: ${record.afterSixMinutes}m (${record.leaveCoverMinutes || 0}m deducts from leave hours)`
+                                      : `Worked past shift end: ${record.afterSixMinutes}m (${record.leaveCoverMinutes || 0}m deducts from leave hours)`
+                                  }
+                                >
+                                  {record.holidayType === 'half-after-lunch' ? '🌓' : '🌙'} +{record.afterSixMinutes}m ({record.leaveCoverMinutes || 0}m Cover)
                                 </span>
                               ) : (
                                 '--'
@@ -3130,10 +3173,10 @@ export default function Home() {
                   value={modalHolidayType}
                   onChange={(e) => setModalHolidayType(e.target.value as any)}
                 >
-                  <option value="none">Regular Working Day (8h standard)</option>
-                  <option value="full">Full Day Holiday (0h required)</option>
-                  <option value="half-before-lunch">Half Leave - Before Lunch (4h required, No lunch deduction)</option>
-                  <option value="half-after-lunch">Half Leave - After Lunch (4h required, No lunch deduction)</option>
+                  <option value="none">Regular Working Day (8h standard · Shift 9 AM - 6 PM)</option>
+                  <option value="half-after-lunch">🌓 Official Half Day - After Lunch (Shift 9 AM - 1 PM · 4h · Extra time covers leave)</option>
+                  <option value="half-before-lunch">🌓 Official Half Day - Before Lunch (Shift 2 PM - 6 PM · 4h · Extra time covers leave)</option>
+                  <option value="full">🎉 Full Day Holiday (0h required)</option>
                 </select>
               </div>
 
@@ -3369,8 +3412,10 @@ export default function Home() {
 
               {modalStatus === 'present' && (
                 <div className={styles.manualNote}>
-                  💡 <strong>Calculation Note:</strong> {modalHolidayType === 'half-before-lunch' || modalHolidayType === 'half-after-lunch' ? (
-                    <>Half Day Shift (4h required). Lunch break is <strong>NOT</strong> deducted, so leaving after 1:00 PM (e.g. leaving at 1:45 PM) fully counts towards your working time (e.g. 45 mins work time).</>
+                  💡 <strong>Calculation Note:</strong> {modalHolidayType === 'half-after-lunch' ? (
+                    <>Half Day Shift (9:00 AM - 1:00 PM, 4h required). Lunch break is <strong>NOT</strong> deducted. Any extra time worked after 1:00 PM (e.g. leaving at 1:45 PM) counts as 45m post-shift cover time and deducts directly from your monthly leave hours.</>
+                  ) : modalHolidayType === 'half-before-lunch' ? (
+                    <>Half Day Shift (2:00 PM - 6:00 PM, 4h required). Lunch break is <strong>NOT</strong> deducted. Any extra time worked past 6:00 PM deducts directly from your monthly leave hours.</>
                   ) : (
                     <>Net work hours will be calculated as <code>(Clock Out - Clock In) - (Lunch Break overlap, max 1h) - Math.max(0, Rest Time - 20 minutes)</code>.</>
                   )}
