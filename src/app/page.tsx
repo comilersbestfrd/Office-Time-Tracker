@@ -6,7 +6,7 @@ import styles from './page.module.css';
 import { auth, db, googleProvider, logAnalyticsEvent } from '@/lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { ref, onValue, set, get } from 'firebase/database';
-import { RecordSession, ShortLeaveSession, DayRecord, DashboardStats, calculateRecordHours, calculateShortLeaveDeduction, Holiday, HolidayType } from '@/lib/calculations';
+import { RecordSession, ShortLeaveSession, DayRecord, DashboardStats, calculateRecordHours, calculateShortLeaveDeduction, Holiday, HolidayType, NEW_POLICY_START_DATE } from '@/lib/calculations';
 
 const ADMIN_EMAIL = 'woxxinsolution12@gmail.com';
 
@@ -2081,43 +2081,49 @@ export default function Home() {
         }
         hoursWorkedTotal += worked;
 
-        if (isToday && !record.outTime) {
-          const inTime = record.inTime ? new Date(record.inTime) : null;
-          let lateMins = 0;
-          if (inTime) {
-            const shiftStartStr = isHalfDay && holidayType === 'half-before-lunch' ? '14:00:00' : '09:00:00';
-            const shiftStart = new Date(`${record.date}T${shiftStartStr}`);
-            if (inTime.getTime() > shiftStart.getTime()) {
-              lateMins = Math.round((inTime.getTime() - shiftStart.getTime()) / 60000);
+        if (record.date >= NEW_POLICY_START_DATE) {
+          if (isToday && !record.outTime) {
+            const inTime = record.inTime ? new Date(record.inTime) : null;
+            let lateMins = 0;
+            if (inTime) {
+              const shiftStartStr = isHalfDay && holidayType === 'half-before-lunch' ? '14:00:00' : '09:00:00';
+              const shiftStart = new Date(`${record.date}T${shiftStartStr}`);
+              if (inTime.getTime() > shiftStart.getTime()) {
+                lateMins = Math.round((inTime.getTime() - shiftStart.getTime()) / 60000);
+              }
             }
-          }
-          const isLateApproved = Boolean(record.isLateApproved);
-          totalLateMinutes += lateMins;
-          if (isLateApproved) {
-            approvedLateMinutesTotal += lateMins;
+            const isLateApproved = Boolean(record.isLateApproved);
+            totalLateMinutes += lateMins;
+            if (isLateApproved) {
+              approvedLateMinutesTotal += lateMins;
+            } else {
+              unapprovedLateMinutesTotal += lateMins;
+            }
+            afterSixMinutesTotal += liveAfterSixMins;
+            leaveCoverMinutesTotal += liveLeaveCoverMins;
           } else {
-            unapprovedLateMinutesTotal += lateMins;
+            totalLateMinutes += record.lateMinutes || 0;
+            unapprovedLateMinutesTotal += record.unapprovedLateMinutes || 0;
+            approvedLateMinutesTotal += record.approvedLateMinutes || 0;
+            coveredLateMinutesTotal += record.coveredLateMinutes || 0;
+            afterSixMinutesTotal += record.afterSixMinutes || 0;
+            leaveCoverMinutesTotal += record.leaveCoverMinutes || 0;
           }
-          afterSixMinutesTotal += liveAfterSixMins;
-          leaveCoverMinutesTotal += liveLeaveCoverMins;
-        } else {
-          totalLateMinutes += record.lateMinutes || 0;
-          unapprovedLateMinutesTotal += record.unapprovedLateMinutes || 0;
-          approvedLateMinutesTotal += record.approvedLateMinutes || 0;
-          coveredLateMinutesTotal += record.coveredLateMinutes || 0;
-          afterSixMinutesTotal += record.afterSixMinutes || 0;
-          leaveCoverMinutesTotal += record.leaveCoverMinutes || 0;
         }
       } else if (record.status === 'absent') {
         absentDays++;
         if (isHalfDay) {
           totalWorkDays += 0.5;
           pendingHoursTotal += 4;
-          leaveHoursTotal += 4;
+          if (record.date >= NEW_POLICY_START_DATE) {
+            leaveHoursTotal += 4;
+          }
         } else if (!isFullHoliday) {
           totalWorkDays += 1;
           pendingHoursTotal += 8;
-          leaveHoursTotal += 8;
+          if (record.date >= NEW_POLICY_START_DATE) {
+            leaveHoursTotal += 8;
+          }
         }
       } else if (record.status === 'weekly-off') {
         weeklyOffDays++;
@@ -2801,7 +2807,11 @@ export default function Home() {
                 {formatHoursToText(displayStats.remainingLeaveHours || 0)}
               </div>
               <div className={styles.statSubtext}>
-                {displayStats.leaveHoursTotal || 0}h leave quota - {Math.round((displayStats.leaveCoverHoursTotal || 0) * 60)}m covered after 6 PM
+                {displayStats.leaveCoverHoursTotal && displayStats.leaveCoverHoursTotal > 0
+                  ? `${displayStats.leaveHoursTotal || 0}h quota - ${Math.round((displayStats.leaveCoverHoursTotal || 0) * 60)}m covered after 6 PM`
+                  : filterEndDate && filterEndDate < NEW_POLICY_START_DATE
+                  ? 'Previous month standard record'
+                  : `${displayStats.leaveHoursTotal || 0}h leave quota (0m covered)`}
               </div>
             </div>
 
@@ -2817,7 +2827,9 @@ export default function Home() {
                 {displayStats.unapprovedLateMinutesTotal || 0} mins
               </div>
               <div className={styles.statSubtext}>
-                Unapproved late cuts | Approved: {displayStats.approvedLateMinutesTotal || 0}m
+                {filterEndDate && filterEndDate < NEW_POLICY_START_DATE
+                  ? 'Policy active from Oct 2026'
+                  : `Unapproved late cuts | Approved: ${displayStats.approvedLateMinutesTotal || 0}m`}
               </div>
             </div>
           </div>
@@ -3028,7 +3040,7 @@ export default function Home() {
                               : '--'}
                           </td>
                           <td>
-                            {record.status === 'present' ? (
+                            {record.status === 'present' && record.date >= NEW_POLICY_START_DATE ? (
                               record.lateMinutes && record.lateMinutes > 0 ? (
                                 record.isLateApproved ? (
                                   <span className={styles.badgeApproved} title={record.lateReason || 'Late approved by admin'}>
@@ -3047,7 +3059,7 @@ export default function Home() {
                             )}
                           </td>
                           <td>
-                            {record.status === 'present' ? (
+                            {record.status === 'present' && record.date >= NEW_POLICY_START_DATE ? (
                               record.afterSixMinutes && record.afterSixMinutes > 0 ? (
                                 <span className={styles.badgeCover} title="Time past 6 PM deducts from monthly leave hours">
                                   🌙 +{record.afterSixMinutes}m ({record.leaveCoverMinutes || 0}m Cover)

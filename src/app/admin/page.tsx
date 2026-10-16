@@ -7,7 +7,7 @@ import { auth, db } from '@/lib/firebase';
 import { useAdminGuard } from '@/hooks/useAdminGuard';
 import styles from './admin.module.css';
 
-import { DayRecord, Holiday, HolidayType, calculateRecordHours } from '@/lib/calculations';
+import { DayRecord, Holiday, HolidayType, calculateRecordHours, NEW_POLICY_START_DATE } from '@/lib/calculations';
 
 interface UserProfile {
   email: string;
@@ -203,9 +203,11 @@ export default function AdminDashboard() {
         if (r.status === 'present') {
           totalPresent++;
           totalHoursWorked += (r.workedHours || 0);
-          totalUnapprovedLateMinutes += (r.unapprovedLateMinutes || 0);
-          totalApprovedLateMinutes += (r.approvedLateMinutes || 0);
-          totalLeaveCoverMinutes += (r.leaveCoverMinutes || 0);
+          if (r.date >= NEW_POLICY_START_DATE) {
+            totalUnapprovedLateMinutes += (r.unapprovedLateMinutes || 0);
+            totalApprovedLateMinutes += (r.approvedLateMinutes || 0);
+            totalLeaveCoverMinutes += (r.leaveCoverMinutes || 0);
+          }
         }
         if (r.status === 'absent') totalAbsent++;
         if (r.status === 'weekly-off') totalWeeklyOff++;
@@ -603,7 +605,7 @@ export default function AdminDashboard() {
                             : '--'}
                         </td>
                         <td>
-                          {rec.status === 'present' ? (
+                          {rec.status === 'present' && rec.date >= NEW_POLICY_START_DATE ? (
                             rec.lateMinutes && rec.lateMinutes > 0 ? (
                               rec.isLateApproved ? (
                                 <span className={`${styles.statusBadge} ${styles.badgeApproved}`} title={rec.lateReason || 'Late approved by admin'}>
@@ -622,7 +624,7 @@ export default function AdminDashboard() {
                           )}
                         </td>
                         <td>
-                          {rec.status === 'present' ? (
+                          {rec.status === 'present' && rec.date >= NEW_POLICY_START_DATE ? (
                             rec.afterSixMinutes && rec.afterSixMinutes > 0 ? (
                               <span className={`${styles.statusBadge} ${styles.badgeCover}`} title="Time past 6 PM deducts from monthly leave hours">
                                 🌙 +{rec.afterSixMinutes}m ({rec.leaveCoverMinutes || 0}m Cover)
@@ -640,7 +642,7 @@ export default function AdminDashboard() {
                         <td>{formatHoursToHHMM(rec.pendingHours)}</td>
                         <td className={styles.notesCell}>{rec.notes || '--'}</td>
                         <td style={{ whiteSpace: 'nowrap' }}>
-                          {rec.status === 'present' && rec.lateMinutes && rec.lateMinutes > 0 && (
+                          {rec.status === 'present' && rec.date >= NEW_POLICY_START_DATE && rec.lateMinutes && rec.lateMinutes > 0 && (
                             <button
                               type="button"
                               className={rec.isLateApproved ? styles.btnSmallWarning : styles.btnSmallSuccess}

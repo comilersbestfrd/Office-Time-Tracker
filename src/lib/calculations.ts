@@ -93,6 +93,8 @@ export function calculateShortLeaveDeduction(
   return { grossMinutes, lunchOverlapMinutes, netDeductedMinutes };
 }
 
+export const NEW_POLICY_START_DATE = '2026-10-01';
+
 // Calculate hours for a single day record
 export function calculateRecordHours(
   record: DayRecord,
@@ -105,6 +107,9 @@ export function calculateRecordHours(
   const isHalfDay = effectiveHolidayType === 'half-before-lunch' || effectiveHolidayType === 'half-after-lunch';
   const isFullHoliday = effectiveHolidayType === 'full' || (!effectiveHolidayType && record.status === 'holiday');
   const targetRequiredHours = isHalfDay ? 4 : (isFullHoliday ? 0 : 8);
+
+  // New policy (fixed 9-6 shift, late cuts, after-6pm leave cover) starts from October 1st, 2026 (this month)
+  const isNewPolicyActive = record.date >= NEW_POLICY_START_DATE;
 
   if (record.status !== 'present') {
     let pending = 0;
@@ -165,7 +170,115 @@ export function calculateRecordHours(
     isAutoClockedOut = true;
   }
 
-  // Shift Timing (Fixed 9:00 AM - 6:00 PM for full days)
+  // PREVIOUS MONTH CALCULATION (Pre-October 2026): Standard rules without 6 PM cap or late salary cuts
+  if (!isNewPolicyActive) {
+    const nineAm = new Date(`${record.date}T09:00:00`);
+    let earlyMinutes = 0;
+    if (inTime.getTime() < nineAm.getTime()) {
+      const earlyEnd = Math.min(outTime.getTime(), nineAm.getTime());
+      if (earlyEnd > inTime.getTime()) {
+        earlyMinutes = (earlyEnd - inTime.getTime()) / 60000;
+      }
+    }
+    const effectiveStartTime = inTime.getTime() < nineAm.getTime() ? nineAm : inTime;
+    let elapsedMs = 0;
+    if (outTime.getTime() > effectiveStartTime.getTime()) {
+      elapsedMs = outTime.getTime() - effectiveStartTime.getTime();
+    }
+
+    const lunchStart = new Date(`${record.date}T13:00:00`);
+    const lunchEnd = new Date(`${record.date}T14:00:00`);
+    let lunchOverlapMs = 0;
+    if (!isHalfDay && !isFullHoliday) {
+      const overlapStart = new Date(Math.max(effectiveStartTime.getTime(), lunchStart.getTime()));
+      const overlapEnd = new Date(Math.min(outTime.getTime(), lunchEnd.getTime()));
+      if (overlapStart.getTime() < overlapEnd.getTime()) {
+        lunchOverlapMs = overlapEnd.getTime() - overlapStart.getTime();
+      }
+    }
+    const lunchDeductionMinutes = lunchOverlapMs / 60000;
+
+    let totalRestMinutes = record.restTimeTotal || 0;
+    if (record.activeRestStart) {
+      const restStart = new Date(record.activeRestStart);
+      const restEnd = record.outTime ? new Date(record.outTime) : new Date(nowStr || new Date().toISOString());
+      const activeRestMs = restEnd.getTime() - restStart.getTime();
+      if (activeRestMs > 0) {
+        totalRestMinutes += activeRestMs / 60000;
+      }
+    }
+
+    const allowedRest = record.allowedRestLimit !== undefined ? record.allowedRestLimit : defaultAllowedRest;
+    const excessRestMinutes = Math.max(0, totalRestMinutes - allowedRest);
+    const excessRestMs = excessRestMinutes * 60 * 1000;
+
+    let shortLeaveDeductionMs = 0;
+    const allShortLeaves: ShortLeaveSession[] = [...(record.shortLeaveSessions || [])];
+    if (record.activeShortLeaveStart) {
+      const endIso = record.outTime || (nowStr || new Date().toISOString());
+      allShortLeaves.push({
+        start: record.activeShortLeaveStart,
+        end: endIso,
+        reason: record.activeShortLeaveReason || 'Short Leave',
+      });
+    }
+
+    let totalNetShortLeaveMins = 0;
+    allShortLeaves.forEach((s) => {
+      if (!s.start) return;
+      const sStart = new Date(s.start).getTime();
+      const sEnd = s.end ? new Date(s.end).getTime() : (record.outTime ? new Date(record.outTime).getTime() : new Date().getTime());
+      if (sEnd > sStart) {
+        let lunchOverlap = 0;
+        if (!isHalfDay && !isFullHoliday) {
+          const lunchOverlapStart = Math.max(sStart, lunchStart.getTime());
+          const lunchOverlapEnd = Math.min(sEnd, lunchEnd.getTime());
+          lunchOverlap = Math.max(0, lunchOverlapEnd - lunchOverlapStart);
+        }
+        const netLeaveMs = Math.max(0, (sEnd - sStart) - lunchOverlap);
+        totalNetShortLeaveMins += netLeaveMs / 60000;
+
+        const winStart = Math.max(effectiveStartTime.getTime(), sStart);
+        const winEnd = Math.min(outTime.getTime(), sEnd);
+        if (winEnd > winStart) {
+          let spanMs = winEnd - winStart;
+          if (!isHalfDay && !isFullHoliday) {
+            const lunchWinStart = Math.max(winStart, lunchStart.getTime());
+            const lunchWinEnd = Math.min(winEnd, lunchEnd.getTime());
+            if (lunchWinEnd > lunchWinStart) {
+              spanMs -= (lunchWinEnd - lunchWinStart);
+            }
+          }
+          shortLeaveDeductionMs += Math.max(0, spanMs);
+        }
+      }
+    });
+
+    const netWorkedMs = Math.max(0, elapsedMs - lunchOverlapMs - excessRestMs - shortLeaveDeductionMs);
+    const workedHours = netWorkedMs / (1000 * 60 * 60);
+    const pendingHours = targetRequiredHours - workedHours;
+
+    return {
+      ...record,
+      holidayType: effectiveHolidayType,
+      outTime: outTimeStr,
+      isAutoClockedOut,
+      earlyTime: parseFloat(earlyMinutes.toFixed(2)),
+      lunchDeduction: parseFloat(lunchDeductionMinutes.toFixed(2)),
+      shortLeaveTotal: Math.round(totalNetShortLeaveMins),
+      workedHours: parseFloat(workedHours.toFixed(2)),
+      pendingHours: parseFloat(pendingHours.toFixed(2)),
+      lateMinutes: 0,
+      isLateApproved: false,
+      approvedLateMinutes: 0,
+      unapprovedLateMinutes: 0,
+      afterSixMinutes: 0,
+      coveredLateMinutes: 0,
+      leaveCoverMinutes: 0,
+    };
+  }
+
+  // THIS MONTH CALCULATION (From October 1st, 2026 onwards): Fixed 9:00 AM - 6:00 PM shift
   const shiftStartStr = effectiveHolidayType === 'half-before-lunch' ? '14:00:00' : '09:00:00';
   const shiftEndStr = effectiveHolidayType === 'half-after-lunch' ? '13:00:00' : '18:00:00';
   const shiftStart = new Date(`${record.date}T${shiftStartStr}`);
