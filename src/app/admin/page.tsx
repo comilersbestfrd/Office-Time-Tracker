@@ -7,7 +7,7 @@ import { auth, db } from '@/lib/firebase';
 import { useAdminGuard } from '@/hooks/useAdminGuard';
 import styles from './admin.module.css';
 
-import { DayRecord, Holiday, calculateRecordHours } from '@/lib/calculations';
+import { DayRecord, Holiday, HolidayType, calculateRecordHours } from '@/lib/calculations';
 
 interface UserProfile {
   email: string;
@@ -57,7 +57,7 @@ export default function AdminDashboard() {
   const { isAdminUser, loading: adminLoading } = useAdminGuard();
   const router = useRouter();
 
-  const [allUsersData, setAllUsersData] = useState<UserData[]>([]);
+  const [rawUsersMap, setRawUsersMap] = useState<Record<string, DayRecord[]>>({});
   const [profiles, setProfiles] = useState<Record<string, UserProfile>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +73,7 @@ export default function AdminDashboard() {
   const [holidays, setHolidays] = useState<Holiday[]>([]);
   const [holidayDateInput, setHolidayDateInput] = useState('');
   const [holidayNameInput, setHolidayNameInput] = useState('');
+  const [holidayTypeInput, setHolidayTypeInput] = useState<HolidayType>('full');
 
   // Load user profiles
   useEffect(() => {
@@ -111,21 +112,16 @@ export default function AdminDashboard() {
     const unsub = onValue(recordsRef, (snap) => {
       const data = snap.val();
       if (!data) {
-        setAllUsersData([]);
+        setRawUsersMap({});
         setLoading(false);
         return;
       }
-      const users: UserData[] = Object.keys(data).map((uid) => {
+      const map: Record<string, DayRecord[]> = {};
+      Object.keys(data).forEach((uid) => {
         const userRecords = data[uid] || {};
-        const records: DayRecord[] = Object.values(userRecords);
-        const recalculated = records.map(r => calculateRecordHours(r));
-        return {
-          uid,
-          profile: null,
-          records: recalculated.sort((a, b) => b.date.localeCompare(a.date)),
-        };
+        map[uid] = Object.values(userRecords);
       });
-      setAllUsersData(users);
+      setRawUsersMap(map);
       setLoading(false);
     }, (err) => {
       console.error('Failed to load records:', err);
@@ -137,6 +133,22 @@ export default function AdminDashboard() {
     });
     return () => unsub();
   }, [isAdminUser]);
+
+  // Recalculate all user records using matching holidays
+  const allUsersData: UserData[] = useMemo(() => {
+    return Object.keys(rawUsersMap).map((uid) => {
+      const records = rawUsersMap[uid] || [];
+      const recalculated = records.map((r) => {
+        const matchingHoliday = holidays.find((h) => h.date === r.date);
+        return calculateRecordHours(r, undefined, undefined, matchingHoliday);
+      });
+      return {
+        uid,
+        profile: null,
+        records: recalculated.sort((a, b) => b.date.localeCompare(a.date)),
+      };
+    });
+  }, [rawUsersMap, holidays]);
 
   // Load holidays
   useEffect(() => {
@@ -181,6 +193,9 @@ export default function AdminDashboard() {
     let totalAbsent = 0;
     let totalWeeklyOff = 0;
     let totalHoursWorked = 0;
+    let totalUnapprovedLateMinutes = 0;
+    let totalApprovedLateMinutes = 0;
+    let totalLeaveCoverMinutes = 0;
 
     filteredData.forEach((u) => {
       u.records.forEach((r) => {
@@ -188,13 +203,25 @@ export default function AdminDashboard() {
         if (r.status === 'present') {
           totalPresent++;
           totalHoursWorked += (r.workedHours || 0);
+          totalUnapprovedLateMinutes += (r.unapprovedLateMinutes || 0);
+          totalApprovedLateMinutes += (r.approvedLateMinutes || 0);
+          totalLeaveCoverMinutes += (r.leaveCoverMinutes || 0);
         }
         if (r.status === 'absent') totalAbsent++;
         if (r.status === 'weekly-off') totalWeeklyOff++;
       });
     });
 
-    return { totalRecords, totalPresent, totalAbsent, totalWeeklyOff, totalHoursWorked };
+    return {
+      totalRecords,
+      totalPresent,
+      totalAbsent,
+      totalWeeklyOff,
+      totalHoursWorked,
+      totalUnapprovedLateMinutes,
+      totalApprovedLateMinutes,
+      totalLeaveCoverMinutes,
+    };
   }, [filteredData]);
 
   const getUserLabel = (uid: string) => {
@@ -214,6 +241,16 @@ export default function AdminDashboard() {
     await set(ref(db, `records/${uid}/${date}`), null);
   };
 
+  const handleToggleLateApproval = async (uid: string, record: DayRecord) => {
+    const matchingHoliday = holidays.find((h) => h.date === record.date);
+    const updated: DayRecord = {
+      ...record,
+      isLateApproved: !record.isLateApproved,
+    };
+    const recalculated = calculateRecordHours(updated, undefined, undefined, matchingHoliday);
+    await set(ref(db, `records/${uid}/${record.date}`), recalculated);
+  };
+
   const handleDeleteAllUserRecords = async (uid: string) => {
     const label = getUserLabel(uid);
     if (!window.confirm(`Delete ALL records for ${label}? This cannot be undone.`)) return;
@@ -229,6 +266,7 @@ export default function AdminDashboard() {
     const holiday: Holiday = {
       date: holidayDateInput,
       name: holidayNameInput.trim(),
+      type: holidayTypeInput,
     };
 
     // Update local state instantly for immediate UI feedback
@@ -251,6 +289,7 @@ export default function AdminDashboard() {
 
       setHolidayDateInput('');
       setHolidayNameInput('');
+      setHolidayTypeInput('full');
     } catch (err: any) {
       console.error('Error saving holiday:', err);
       alert(`Failed to save holiday: ${err.message}`);
@@ -342,6 +381,14 @@ export default function AdminDashboard() {
           <span className={styles.statNumber}>{formatHoursToHHMM(totalStats.totalHoursWorked)}</span>
           <span className={styles.statLabel}>Hours Worked</span>
         </div>
+        <div className={`${styles.statCard} ${styles.statAbsent}`}>
+          <span className={styles.statNumber}>{totalStats.totalUnapprovedLateMinutes}m</span>
+          <span className={styles.statLabel}>Salary Cut (Late)</span>
+        </div>
+        <div className={`${styles.statCard} ${styles.statPresent}`}>
+          <span className={styles.statNumber}>{totalStats.totalLeaveCoverMinutes}m</span>
+          <span className={styles.statLabel}>Leave Cover Earned</span>
+        </div>
       </div>
 
       {/* Holidays Management */}
@@ -365,13 +412,26 @@ export default function AdminDashboard() {
             <label>Holiday Name</label>
             <input
               type="text"
-              placeholder="e.g. Independence Day"
+              placeholder="e.g. Independence Day / Diwali"
               value={holidayNameInput}
               onChange={(e) => setHolidayNameInput(e.target.value)}
               className={styles.dateInput}
               style={{ width: '100%' }}
               required
             />
+          </div>
+          <div className={styles.filterGroup} style={{ minWidth: '220px' }}>
+            <label>Holiday / Leave Type</label>
+            <select
+              value={holidayTypeInput}
+              onChange={(e) => setHolidayTypeInput(e.target.value as HolidayType)}
+              className={styles.selectInput}
+              style={{ width: '100%' }}
+            >
+              <option value="full">Full Day Holiday</option>
+              <option value="half-before-lunch">Half Leave (Before Lunch)</option>
+              <option value="half-after-lunch">Half Leave (After Lunch)</option>
+            </select>
           </div>
           <button type="submit" className={styles.btnPrimary} style={{ padding: '0.65rem 1.5rem', borderRadius: '8px' }}>
             ➕ Add Holiday
@@ -387,6 +447,7 @@ export default function AdminDashboard() {
                 <tr>
                   <th>Date</th>
                   <th>Holiday Name</th>
+                  <th>Type</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -394,7 +455,18 @@ export default function AdminDashboard() {
                 {holidays.map((h) => (
                   <tr key={h.date}>
                     <td className={styles.dateCell}>{h.date}</td>
-                    <td>🎉 {h.name}</td>
+                    <td>
+                      {h.type === 'half-before-lunch' ? '🌓' : h.type === 'half-after-lunch' ? '🌗' : '🎉'} {h.name}
+                    </td>
+                    <td>
+                      <span className={`${styles.statusBadge} ${h.type?.startsWith('half') ? styles.badgeHalfLeave : styles.badgeHoliday}`}>
+                        {h.type === 'half-before-lunch'
+                          ? 'Half Leave (Before Lunch)'
+                          : h.type === 'half-after-lunch'
+                          ? 'Half Leave (After Lunch)'
+                          : 'Full Day'}
+                      </span>
+                    </td>
                     <td>
                       <button
                         type="button"
@@ -494,6 +566,8 @@ export default function AdminDashboard() {
                       <th>Early (min)</th>
                       <th>Break (min)</th>
                       <th>Lunch (min)</th>
+                      <th>Late (Salary Cut)</th>
+                      <th>After 6 PM (Leave Cover)</th>
                       <th>Worked (hh:mm)</th>
                       <th>Pending (hh:mm)</th>
                       <th>Notes</th>
@@ -506,27 +580,76 @@ export default function AdminDashboard() {
                         <td className={styles.dateCell}>{rec.date}</td>
                         <td>
                           <span className={`${styles.statusBadge} ${
-                            rec.status === 'present' ? styles.badgePresent :
+                            rec.status === 'present' ? (rec.holidayType?.startsWith('half') ? styles.badgeHalfLeave : styles.badgePresent) :
                             rec.status === 'absent' ? styles.badgeAbsent :
                             rec.status === 'holiday' ? styles.badgeHoliday :
                             styles.badgeOff
                           }`}>
-                            {rec.status === 'present' ? '✅' : 
+                            {rec.status === 'present' ? (rec.holidayType === 'half-before-lunch' ? '🌓' : rec.holidayType === 'half-after-lunch' ? '🌗' : '✅') : 
                              rec.status === 'absent' ? '❌' : 
                              rec.status === 'holiday' ? '🎉' : '🔵'} {rec.status}
+                            {rec.holidayType === 'half-before-lunch' ? ' (Half: AM)' : rec.holidayType === 'half-after-lunch' ? ' (Half: PM)' : ''}
                           </span>
                         </td>
                         <td>{formatTime(rec.inTime)}</td>
                         <td>{formatTime(rec.outTime)}</td>
                         <td>{rec.status === 'present' && rec.earlyTime && rec.earlyTime > 0 ? Math.round(rec.earlyTime) : '--'}</td>
                         <td>{rec.status === 'present' && rec.restTimeTotal ? Math.round(rec.restTimeTotal) : (rec.status === 'present' ? 0 : '--')}</td>
-                        <td>{rec.lunchDeduction ? Math.round(rec.lunchDeduction) : '--'}</td>
+                        <td>
+                          {rec.status === 'present'
+                            ? (rec.holidayType?.startsWith('half')
+                              ? '0m (Half Day)'
+                              : (rec.lunchDeduction ? `${Math.round(rec.lunchDeduction)}m` : '0m'))
+                            : '--'}
+                        </td>
+                        <td>
+                          {rec.status === 'present' ? (
+                            rec.lateMinutes && rec.lateMinutes > 0 ? (
+                              rec.isLateApproved ? (
+                                <span className={`${styles.statusBadge} ${styles.badgeApproved}`} title={rec.lateReason || 'Late approved by admin'}>
+                                  0m (Approved {rec.lateMinutes}m)
+                                </span>
+                              ) : (
+                                <span className={`${styles.statusBadge} ${styles.badgeCut}`} title="Unapproved late cuts directly from salary">
+                                  ⚠️ {rec.lateMinutes}m Cut
+                                </span>
+                              )
+                            ) : (
+                              '--'
+                            )
+                          ) : (
+                            '--'
+                          )}
+                        </td>
+                        <td>
+                          {rec.status === 'present' ? (
+                            rec.afterSixMinutes && rec.afterSixMinutes > 0 ? (
+                              <span className={`${styles.statusBadge} ${styles.badgeCover}`} title="Time past 6 PM deducts from monthly leave hours">
+                                🌙 +{rec.afterSixMinutes}m ({rec.leaveCoverMinutes || 0}m Cover)
+                              </span>
+                            ) : (
+                              '--'
+                            )
+                          ) : (
+                            '--'
+                          )}
+                        </td>
                         <td className={styles.hoursCell}>
                           {formatHoursToHHMM(rec.workedHours)}
                         </td>
                         <td>{formatHoursToHHMM(rec.pendingHours)}</td>
                         <td className={styles.notesCell}>{rec.notes || '--'}</td>
-                        <td>
+                        <td style={{ whiteSpace: 'nowrap' }}>
+                          {rec.status === 'present' && rec.lateMinutes && rec.lateMinutes > 0 && (
+                            <button
+                              type="button"
+                              className={rec.isLateApproved ? styles.btnSmallWarning : styles.btnSmallSuccess}
+                              onClick={() => handleToggleLateApproval(userData.uid, rec)}
+                              title={rec.isLateApproved ? 'Revoke late approval' : 'Approve late arrival so employee can cover it after 6 PM'}
+                            >
+                              {rec.isLateApproved ? 'Revoke' : '✅ Approve'}
+                            </button>
+                          )}
                           <button
                             className={styles.btnSmallDanger}
                             onClick={() => handleDeleteRecord(userData.uid, rec.date)}

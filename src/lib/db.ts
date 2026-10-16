@@ -35,10 +35,12 @@ export async function getRecords(): Promise<DayRecord[]> {
 export async function saveRecord(record: DayRecord): Promise<DayRecord> {
   await ensureDb();
   const records = await getRecords();
+  const holidays = await getHolidays();
+  const holiday = holidays.find((h) => h.date === record.date);
   const index = records.findIndex((r) => r.date === record.date);
 
   // Recalculate hours before saving if it is completed
-  const updatedRecord = calculateRecordHours(record);
+  const updatedRecord = calculateRecordHours(record, undefined, undefined, holiday);
 
   if (index >= 0) {
     records[index] = updatedRecord;
@@ -130,41 +132,75 @@ export async function getStats(nowStr?: string): Promise<DashboardStats> {
   let weeklyOffDays = 0;
   let hoursWorkedTotal = 0;
   let pendingHoursTotal = 0;
+  let totalLateMinutes = 0;
+  let unapprovedLateMinutesTotal = 0;
+  let approvedLateMinutesTotal = 0;
+  let coveredLateMinutesTotal = 0;
+  let afterSixMinutesTotal = 0;
+  let leaveCoverMinutesTotal = 0;
+  let leaveHoursTotal = 0;
 
   for (const record of records) {
+    const holiday = holidays.find((h) => h.date === record.date);
+    const holidayType = record.holidayType || holiday?.type;
+    const isHalfDay = holidayType === 'half-before-lunch' || holidayType === 'half-after-lunch';
+    const isFullHoliday = holidayType === 'full' || (!holidayType && (!!holiday || record.status === 'holiday'));
+
     // If the record is currently active, compute temporary values for stats
-    const evaluated = record.outTime ? record : calculateRecordHours(record, currentNow);
-    const isHoliday = holidays.some((h) => h.date === record.date);
+    const evaluated = record.outTime ? record : calculateRecordHours(record, currentNow, undefined, holiday);
 
     if (evaluated.status === 'present') {
       presentDays++;
-      if (!isHoliday) {
-        totalWorkDays++; // Expected to work only if not a holiday
+      if (isHalfDay) {
+        totalWorkDays += 0.5; // Expected half working day (4h)
+        pendingHoursTotal += (evaluated.pendingHours !== undefined ? evaluated.pendingHours : 0);
+      } else if (!isFullHoliday) {
+        totalWorkDays += 1; // Expected full working day (8h)
         pendingHoursTotal += (evaluated.pendingHours !== undefined ? evaluated.pendingHours : 0);
       }
       hoursWorkedTotal += evaluated.workedHours;
+      totalLateMinutes += evaluated.lateMinutes || 0;
+      unapprovedLateMinutesTotal += evaluated.unapprovedLateMinutes || 0;
+      approvedLateMinutesTotal += evaluated.approvedLateMinutes || 0;
+      coveredLateMinutesTotal += evaluated.coveredLateMinutes || 0;
+      afterSixMinutesTotal += evaluated.afterSixMinutes || 0;
+      leaveCoverMinutesTotal += evaluated.leaveCoverMinutes || 0;
     } else if (evaluated.status === 'absent') {
       absentDays++;
-      if (!isHoliday) {
-        totalWorkDays++; // Expected to work only if not a holiday
+      if (isHalfDay) {
+        totalWorkDays += 0.5;
+        pendingHoursTotal += 4;
+        leaveHoursTotal += 4;
+      } else if (!isFullHoliday) {
+        totalWorkDays += 1;
         pendingHoursTotal += 8;
+        leaveHoursTotal += 8;
       }
     } else if (evaluated.status === 'weekly-off') {
       weeklyOffDays++;
-      // Weekly offs don't add to required work days
-      // However, if they clocked hours on a weekly off (e.g. weekend work), we add it to hours worked
       if (evaluated.workedHours > 0) {
         hoursWorkedTotal += evaluated.workedHours;
       }
     } else if (evaluated.status === 'holiday') {
-      // Holiday status (if manually set)
-      if (evaluated.workedHours > 0) {
-        hoursWorkedTotal += evaluated.workedHours;
+      if (isHalfDay) {
+        totalWorkDays += 0.5;
+        if (evaluated.workedHours > 0) {
+          hoursWorkedTotal += evaluated.workedHours;
+          pendingHoursTotal += (evaluated.pendingHours !== undefined ? evaluated.pendingHours : (4 - evaluated.workedHours));
+        } else {
+          pendingHoursTotal += 4;
+        }
+      } else {
+        if (evaluated.workedHours > 0) {
+          hoursWorkedTotal += evaluated.workedHours;
+        }
       }
     }
   }
 
   const requiredHoursTotal = totalWorkDays * 8;
+  const leaveCoverHoursTotal = parseFloat((leaveCoverMinutesTotal / 60).toFixed(2));
+  const remainingLeaveHours = Math.max(0, parseFloat((leaveHoursTotal - leaveCoverHoursTotal).toFixed(2)));
 
   return {
     totalWorkDays,
@@ -174,6 +210,14 @@ export async function getStats(nowStr?: string): Promise<DashboardStats> {
     requiredHoursTotal: parseFloat(requiredHoursTotal.toFixed(2)),
     hoursWorkedTotal: parseFloat(hoursWorkedTotal.toFixed(2)),
     pendingHoursTotal: parseFloat(pendingHoursTotal.toFixed(2)),
+    totalLateMinutes,
+    unapprovedLateMinutesTotal,
+    approvedLateMinutesTotal,
+    coveredLateMinutesTotal,
+    afterSixMinutesTotal,
+    leaveHoursTotal,
+    leaveCoverHoursTotal,
+    remainingLeaveHours,
   };
 }
 

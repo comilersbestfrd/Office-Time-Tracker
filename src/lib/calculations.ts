@@ -9,9 +9,12 @@ export interface ShortLeaveSession {
   reason: string; // e.g., "Bank Work", "Document Work", "Home Work", etc.
 }
 
+export type HolidayType = 'full' | 'half-before-lunch' | 'half-after-lunch';
+
 export interface DayRecord {
   date: string; // YYYY-MM-DD
   status: 'present' | 'absent' | 'weekly-off' | 'holiday';
+  holidayType?: HolidayType;
   inTime: string | null; // ISO string
   outTime: string | null; // ISO string, null if active
   restSessions: RecordSession[];
@@ -28,11 +31,20 @@ export interface DayRecord {
   notes?: string;
   isAutoClockedOut?: boolean;
   allowedRestLimit?: number; // custom allowed rest limit in minutes
+  lateMinutes?: number; // minutes arrived late after shift start (09:00 AM)
+  isLateApproved?: boolean; // whether late arrival is approved by admin
+  lateReason?: string; // optional note/reason for late arrival
+  approvedLateMinutes?: number; // approved late arrival (coverable after 6 PM)
+  unapprovedLateMinutes?: number; // unapproved late arrival (cut from salary)
+  afterSixMinutes?: number; // minutes worked after 6:00 PM (18:00)
+  coveredLateMinutes?: number; // approved late minutes covered by working after 6:00 PM
+  leaveCoverMinutes?: number; // time after 6:00 PM that deducts from monthly leave hours
 }
 
 export interface Holiday {
   date: string; // YYYY-MM-DD
   name: string; // e.g., "Independence Day"
+  type?: HolidayType; // 'full' (default), 'half-before-lunch', 'half-after-lunch'
 }
 
 export interface DashboardStats {
@@ -43,6 +55,14 @@ export interface DashboardStats {
   requiredHoursTotal: number;// Expected hours (totalWorkDays * 8)
   hoursWorkedTotal: number;  // Hours actually worked
   pendingHoursTotal: number; // requiredHoursTotal - hoursWorkedTotal
+  totalLateMinutes?: number;
+  unapprovedLateMinutesTotal?: number; // Total minutes cut from salary due to unapproved late
+  approvedLateMinutesTotal?: number;   // Total approved late minutes
+  coveredLateMinutesTotal?: number;    // Total approved late minutes covered after 6 PM
+  afterSixMinutesTotal?: number;       // Total minutes worked after 6:00 PM
+  leaveHoursTotal?: number;            // Total leave/absent hours (absentDays * 8)
+  leaveCoverHoursTotal?: number;       // Total hours worked after 6 PM to cover leave
+  remainingLeaveHours?: number;        // Net remaining leave hours after deducting leave cover hours
 }
 
 // Helper to calculate Short Leave duration and net deduction excluding 1:00 PM - 2:00 PM lunch break
@@ -74,22 +94,53 @@ export function calculateShortLeaveDeduction(
 }
 
 // Calculate hours for a single day record
-export function calculateRecordHours(record: DayRecord, nowStr?: string, defaultAllowedRest: number = 20): DayRecord {
+export function calculateRecordHours(
+  record: DayRecord,
+  nowStr?: string,
+  defaultAllowedRest: number = 20,
+  holiday?: Holiday | null
+): DayRecord {
+  const effectiveHolidayType: HolidayType | undefined =
+    record.holidayType || holiday?.type || (record.status === 'holiday' ? 'full' : undefined);
+  const isHalfDay = effectiveHolidayType === 'half-before-lunch' || effectiveHolidayType === 'half-after-lunch';
+  const isFullHoliday = effectiveHolidayType === 'full' || (!effectiveHolidayType && record.status === 'holiday');
+  const targetRequiredHours = isHalfDay ? 4 : (isFullHoliday ? 0 : 8);
+
   if (record.status !== 'present') {
+    let pending = 0;
+    if (record.status === 'absent') {
+      pending = targetRequiredHours;
+    }
     return {
       ...record,
+      holidayType: effectiveHolidayType,
       earlyTime: 0,
       workedHours: 0,
-      pendingHours: 0, // Weekly off and Absent don't accumulate worked hours on the day itself
+      pendingHours: pending,
+      lateMinutes: 0,
+      isLateApproved: Boolean(record.isLateApproved),
+      approvedLateMinutes: 0,
+      unapprovedLateMinutes: 0,
+      afterSixMinutes: 0,
+      coveredLateMinutes: 0,
+      leaveCoverMinutes: 0,
     };
   }
 
   if (!record.inTime) {
     return {
       ...record,
+      holidayType: effectiveHolidayType,
       earlyTime: 0,
       workedHours: 0,
-      pendingHours: 8,
+      pendingHours: targetRequiredHours,
+      lateMinutes: 0,
+      isLateApproved: Boolean(record.isLateApproved),
+      approvedLateMinutes: 0,
+      unapprovedLateMinutes: 0,
+      afterSixMinutes: 0,
+      coveredLateMinutes: 0,
+      leaveCoverMinutes: 0,
     };
   }
 
@@ -106,43 +157,61 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
   } else if (isToday) {
     outTime = new Date(nowStr || new Date().toISOString());
   } else {
-    // Past day and user forgot to clock out - default to 6:15 PM (18:15)
-    const defaultOut = new Date(`${record.date}T18:15:00`);
+    // Past day and user forgot to clock out - default to 1:00 PM for after-lunch half day, else 6:15 PM (18:15)
+    const defaultOutHourStr = effectiveHolidayType === 'half-after-lunch' ? '13:00:00' : '18:15:00';
+    const defaultOut = new Date(`${record.date}T${defaultOutHourStr}`);
     outTime = defaultOut;
     outTimeStr = defaultOut.toISOString();
     isAutoClockedOut = true;
   }
 
-  const nineAm = new Date(`${record.date}T09:00:00`);
+  // Shift Timing (Fixed 9:00 AM - 6:00 PM for full days)
+  const shiftStartStr = effectiveHolidayType === 'half-before-lunch' ? '14:00:00' : '09:00:00';
+  const shiftEndStr = effectiveHolidayType === 'half-after-lunch' ? '13:00:00' : '18:00:00';
+  const shiftStart = new Date(`${record.date}T${shiftStartStr}`);
+  const shiftEnd = new Date(`${record.date}T${shiftEndStr}`);
 
-  // Calculate Early Time before 9:00 AM (in minutes)
+  // Calculate Early Time before shift start (in minutes)
   let earlyMinutes = 0;
-  if (inTime.getTime() < nineAm.getTime()) {
-    const earlyEnd = Math.min(outTime.getTime(), nineAm.getTime());
+  if (inTime.getTime() < shiftStart.getTime()) {
+    const earlyEnd = Math.min(outTime.getTime(), shiftStart.getTime());
     if (earlyEnd > inTime.getTime()) {
       earlyMinutes = (earlyEnd - inTime.getTime()) / 60000;
     }
   }
 
-  // Work time always starts from 09:00 AM if inTime is earlier
-  const effectiveStartTime = inTime.getTime() < nineAm.getTime() ? nineAm : inTime;
+  // Work time always starts from shift start (09:00 AM) if inTime is earlier
+  const effectiveStartTime = inTime.getTime() < shiftStart.getTime() ? shiftStart : inTime;
 
-  // Elapsed work time in milliseconds (only counts time after 9 AM to out punch)
-  let elapsedMs = 0;
-  if (outTime.getTime() > effectiveStartTime.getTime()) {
-    elapsedMs = outTime.getTime() - effectiveStartTime.getTime();
+  // Calculate Late Arrival after shift start (09:00 AM)
+  let lateMinutes = 0;
+  if (inTime.getTime() > shiftStart.getTime()) {
+    lateMinutes = Math.round((inTime.getTime() - shiftStart.getTime()) / 60000);
   }
 
-  // Calculate Lunch Break (1:00 PM to 2:00 PM) overlap
+  const isLateApproved = Boolean(record.isLateApproved);
+  const approvedLateMinutes = isLateApproved ? lateMinutes : 0;
+  const unapprovedLateMinutes = isLateApproved ? 0 : lateMinutes;
+
+  // Regular shift window: [effectiveStartTime, min(outTime, shiftEnd)]
+  const regularWindowEnd = new Date(Math.min(outTime.getTime(), shiftEnd.getTime()));
+  let regularElapsedMs = 0;
+  if (regularWindowEnd.getTime() > effectiveStartTime.getTime()) {
+    regularElapsedMs = regularWindowEnd.getTime() - effectiveStartTime.getTime();
+  }
+
+  // Calculate Lunch Break (1:00 PM to 2:00 PM) overlap within regular window
   const lunchStart = new Date(`${record.date}T13:00:00`);
   const lunchEnd = new Date(`${record.date}T14:00:00`);
 
-  const overlapStart = new Date(Math.max(effectiveStartTime.getTime(), lunchStart.getTime()));
-  const overlapEnd = new Date(Math.min(outTime.getTime(), lunchEnd.getTime()));
-
   let lunchOverlapMs = 0;
-  if (overlapStart.getTime() < overlapEnd.getTime()) {
-    lunchOverlapMs = overlapEnd.getTime() - overlapStart.getTime();
+  if (!isHalfDay && !isFullHoliday) {
+    const overlapStart = new Date(Math.max(effectiveStartTime.getTime(), lunchStart.getTime()));
+    const overlapEnd = new Date(Math.min(regularWindowEnd.getTime(), lunchEnd.getTime()));
+
+    if (overlapStart.getTime() < overlapEnd.getTime()) {
+      lunchOverlapMs = overlapEnd.getTime() - overlapStart.getTime();
+    }
   }
   const lunchDeductionMinutes = lunchOverlapMs / 60000;
 
@@ -157,15 +226,12 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
     }
   }
 
-  // Allowed rest limit. Daily break time is counted in work time up to allowed limit (default 20m).
-  // Any break time that goes beyond the limit is deducted from work time and becomes pending.
+  // Allowed rest limit
   const allowedRest = record.allowedRestLimit !== undefined ? record.allowedRestLimit : defaultAllowedRest;
   const excessRestMinutes = Math.max(0, totalRestMinutes - allowedRest);
   const excessRestMs = excessRestMinutes * 60 * 1000;
 
-  // Calculate Short Leave Deduction (Not counted as work time)
-  // Each short leave session during shift is subtracted from worked time.
-  // To avoid double-deducting time that falls within the 1:00 PM - 2:00 PM lunch window (which is already deducted by lunchOverlapMs):
+  // Calculate Short Leave Deduction (Not counted as work time) within regular shift window
   let shortLeaveDeductionMs = 0;
   const allShortLeaves: ShortLeaveSession[] = [...(record.shortLeaveSessions || [])];
   if (record.activeShortLeaveStart) {
@@ -183,36 +249,67 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
     const sStart = new Date(s.start).getTime();
     const sEnd = s.end ? new Date(s.end).getTime() : (record.outTime ? new Date(record.outTime).getTime() : new Date().getTime());
     if (sEnd > sStart) {
-      // Exclude lunch break (1:00 PM - 2:00 PM) from short leave minutes
-      const lunchOverlapStart = Math.max(sStart, lunchStart.getTime());
-      const lunchOverlapEnd = Math.min(sEnd, lunchEnd.getTime());
-      const lunchOverlap = Math.max(0, lunchOverlapEnd - lunchOverlapStart);
+      let lunchOverlap = 0;
+      if (!isHalfDay && !isFullHoliday) {
+        const lunchOverlapStart = Math.max(sStart, lunchStart.getTime());
+        const lunchOverlapEnd = Math.min(sEnd, lunchEnd.getTime());
+        lunchOverlap = Math.max(0, lunchOverlapEnd - lunchOverlapStart);
+      }
       const netLeaveMs = Math.max(0, (sEnd - sStart) - lunchOverlap);
       totalNetShortLeaveMins += netLeaveMs / 60000;
 
-      // Net deduction within work window [effectiveStartTime, outTime]
+      // Net deduction within work window [effectiveStartTime, regularWindowEnd]
       const winStart = Math.max(effectiveStartTime.getTime(), sStart);
-      const winEnd = Math.min(outTime.getTime(), sEnd);
+      const winEnd = Math.min(regularWindowEnd.getTime(), sEnd);
       if (winEnd > winStart) {
         let spanMs = winEnd - winStart;
-        // Check overlap with lunch break [lunchStart, lunchEnd]
-        const lunchWinStart = Math.max(winStart, lunchStart.getTime());
-        const lunchWinEnd = Math.min(winEnd, lunchEnd.getTime());
-        if (lunchWinEnd > lunchWinStart) {
-          spanMs -= (lunchWinEnd - lunchWinStart);
+        if (!isHalfDay && !isFullHoliday) {
+          const lunchWinStart = Math.max(winStart, lunchStart.getTime());
+          const lunchWinEnd = Math.min(winEnd, lunchEnd.getTime());
+          if (lunchWinEnd > lunchWinStart) {
+            spanMs -= (lunchWinEnd - lunchWinStart);
+          }
         }
         shortLeaveDeductionMs += Math.max(0, spanMs);
       }
     }
   });
 
-  // Work time = (elapsed work time after 9:00 AM - lunch break - excess break time - short leave deduction)
-  const netWorkedMs = Math.max(0, elapsedMs - lunchOverlapMs - excessRestMs - shortLeaveDeductionMs);
-  const workedHours = netWorkedMs / (1000 * 60 * 60);
-  const pendingHours = 8 - workedHours;
+  // Base worked ms within the regular shift
+  const baseShiftWorkedMs = Math.max(0, regularElapsedMs - lunchOverlapMs - excessRestMs - shortLeaveDeductionMs);
+
+  // Time worked after shiftEnd (6:00 PM / 18:00 for full day)
+  let afterSixMinutes = 0;
+  if (outTime.getTime() > shiftEnd.getTime()) {
+    afterSixMinutes = Math.round((outTime.getTime() - shiftEnd.getTime()) / 60000);
+  }
+
+  // Coverage and Leave Deduction calculation:
+  let coveredLateMinutes = 0;
+  let leaveCoverMinutes = 0;
+
+  if (isLateApproved && approvedLateMinutes > 0) {
+    // Approved late arrival: coverable by working after 6:00 PM
+    coveredLateMinutes = Math.min(afterSixMinutes, approvedLateMinutes);
+    leaveCoverMinutes = Math.max(0, afterSixMinutes - coveredLateMinutes);
+  } else {
+    // Unapproved late arrival: cuts from salary, cannot be covered.
+    // Time worked after 6:00 PM directly deducts from leave hours!
+    coveredLateMinutes = 0;
+    leaveCoverMinutes = afterSixMinutes;
+  }
+
+  // Net worked time includes approved late coverage to reach target required hours
+  const coveredLateMs = coveredLateMinutes * 60 * 1000;
+  const netWorkedMs = baseShiftWorkedMs + coveredLateMs;
+  const workedHours = targetRequiredHours > 0
+    ? Math.min(targetRequiredHours, netWorkedMs / (1000 * 60 * 60))
+    : (netWorkedMs / (1000 * 60 * 60));
+  const pendingHours = Math.max(0, targetRequiredHours - workedHours);
 
   return {
     ...record,
+    holidayType: effectiveHolidayType,
     outTime: outTimeStr,
     isAutoClockedOut,
     earlyTime: parseFloat(earlyMinutes.toFixed(2)),
@@ -220,5 +317,12 @@ export function calculateRecordHours(record: DayRecord, nowStr?: string, default
     shortLeaveTotal: Math.round(totalNetShortLeaveMins),
     workedHours: parseFloat(workedHours.toFixed(2)),
     pendingHours: parseFloat(pendingHours.toFixed(2)),
+    lateMinutes,
+    isLateApproved,
+    approvedLateMinutes,
+    unapprovedLateMinutes,
+    afterSixMinutes,
+    coveredLateMinutes,
+    leaveCoverMinutes,
   };
 }

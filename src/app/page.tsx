@@ -6,7 +6,7 @@ import styles from './page.module.css';
 import { auth, db, googleProvider, logAnalyticsEvent } from '@/lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { ref, onValue, set, get } from 'firebase/database';
-import { RecordSession, ShortLeaveSession, DayRecord, DashboardStats, calculateRecordHours, calculateShortLeaveDeduction, Holiday } from '@/lib/calculations';
+import { RecordSession, ShortLeaveSession, DayRecord, DashboardStats, calculateRecordHours, calculateShortLeaveDeduction, Holiday, HolidayType } from '@/lib/calculations';
 
 const ADMIN_EMAIL = 'woxxinsolution12@gmail.com';
 
@@ -68,6 +68,8 @@ export default function Home() {
   const [liveRestTime, setLiveRestTime] = useState<string>('00:00:00');
   const [liveRestMins, setLiveRestMins] = useState<number>(0);
   const [liveWorkedHoursDecimal, setLiveWorkedHoursDecimal] = useState<number>(0);
+  const [liveAfterSixMins, setLiveAfterSixMins] = useState<number>(0);
+  const [liveLeaveCoverMins, setLiveLeaveCoverMins] = useState<number>(0);
 
 
 
@@ -91,6 +93,7 @@ export default function Home() {
   const [manualInPunch, setManualInPunch] = useState<string>('');
   const [modalDate, setModalDate] = useState<string>('');
   const [modalStatus, setModalStatus] = useState<'present' | 'absent' | 'weekly-off' | 'holiday'>('present');
+  const [modalHolidayType, setModalHolidayType] = useState<HolidayType | 'none'>('none');
   const [modalInTime, setModalInTime] = useState<string>('09:00');
   const [modalOutTime, setModalOutTime] = useState<string>('17:20');
   const [modalRestTime, setModalRestTime] = useState<number>(20);
@@ -98,6 +101,8 @@ export default function Home() {
   const [newBreakStart, setNewBreakStart] = useState<string>('');
   const [newBreakEnd, setNewBreakEnd] = useState<string>('');
   const [modalNotes, setModalNotes] = useState<string>('');
+  const [modalIsLateApproved, setModalIsLateApproved] = useState<boolean>(false);
+  const [modalLateReason, setModalLateReason] = useState<string>('');
 
   // Short Leave State
   const [showShortLeaveModal, setShowShortLeaveModal] = useState<boolean>(false);
@@ -582,6 +587,8 @@ export default function Home() {
       setLiveRestTime('00:00:00');
       setLiveRestMins(0);
       setLiveWorkedHoursDecimal(0);
+      setLiveAfterSixMins(0);
+      setLiveLeaveCoverMins(0);
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
@@ -607,26 +614,69 @@ export default function Home() {
       const excessRestMins = Math.max(0, totalRestMins - effectiveAllowedLimit);
       const excessRestMs = excessRestMins * 60 * 1000;
 
-      // Work time always starts from 09:00 AM
-      const nineAm = new Date(`${todayRecord.date}T09:00:00`);
-      const effectiveStartTime = inTime.getTime() < nineAm.getTime() ? nineAm : inTime;
+      // Check if today is a half-day or full holiday
+      const todayHoliday = holidays.find((h) => h.date === todayRecord.date);
+      const effectiveHolidayType = todayRecord.holidayType || todayHoliday?.type;
+      const isHalfDay = effectiveHolidayType === 'half-before-lunch' || effectiveHolidayType === 'half-after-lunch';
+      const isFullHoliday = effectiveHolidayType === 'full' || (!effectiveHolidayType && !!todayHoliday);
 
-      // Elapsed work time (only after 9:00 AM to now)
-      const elapsedMs = Math.max(0, now.getTime() - effectiveStartTime.getTime());
+      // Shift Timing (Fixed 9:00 AM - 6:00 PM for full days)
+      const shiftStartStr = effectiveHolidayType === 'half-before-lunch' ? '14:00:00' : '09:00:00';
+      const shiftEndStr = effectiveHolidayType === 'half-after-lunch' ? '13:00:00' : '18:00:00';
+      const shiftStart = new Date(`${todayRecord.date}T${shiftStartStr}`);
+      const shiftEnd = new Date(`${todayRecord.date}T${shiftEndStr}`);
 
-      // Calculate Lunch Break (1:00 PM to 2:00 PM) overlap
+      const effectiveStartTime = inTime.getTime() < shiftStart.getTime() ? shiftStart : inTime;
+
+      // Regular shift window: [effectiveStartTime, min(now, shiftEnd)]
+      const regularWindowEnd = new Date(Math.min(now.getTime(), shiftEnd.getTime()));
+      let regularElapsedMs = 0;
+      if (regularWindowEnd.getTime() > effectiveStartTime.getTime()) {
+        regularElapsedMs = regularWindowEnd.getTime() - effectiveStartTime.getTime();
+      }
+
+      // Late arrival & approval
+      let lateMinutes = 0;
+      if (inTime.getTime() > shiftStart.getTime()) {
+        lateMinutes = Math.round((inTime.getTime() - shiftStart.getTime()) / 60000);
+      }
+      const isLateApproved = Boolean(todayRecord.isLateApproved);
+      const approvedLateMinutes = isLateApproved ? lateMinutes : 0;
+
+      // After 6:00 PM (or shiftEnd)
+      let afterSixMinutes = 0;
+      if (now.getTime() > shiftEnd.getTime()) {
+        afterSixMinutes = Math.round((now.getTime() - shiftEnd.getTime()) / 60000);
+      }
+
+      // Coverage:
+      let coveredLateMinutes = 0;
+      let liveLeaveCover = 0;
+      if (isLateApproved && approvedLateMinutes > 0) {
+        coveredLateMinutes = Math.min(afterSixMinutes, approvedLateMinutes);
+        liveLeaveCover = Math.max(0, afterSixMinutes - coveredLateMinutes);
+      } else {
+        coveredLateMinutes = 0;
+        liveLeaveCover = afterSixMinutes;
+      }
+      setLiveAfterSixMins(afterSixMinutes);
+      setLiveLeaveCoverMins(liveLeaveCover);
+
+      // Calculate Lunch Break (1:00 PM to 2:00 PM) overlap within regular window
       const lunchStart = new Date(`${todayRecord.date}T13:00:00`);
       const lunchEnd = new Date(`${todayRecord.date}T14:00:00`);
 
-      const overlapStart = new Date(Math.max(effectiveStartTime.getTime(), lunchStart.getTime()));
-      const overlapEnd = new Date(Math.min(now.getTime(), lunchEnd.getTime()));
-
       let lunchOverlapMs = 0;
-      if (overlapStart.getTime() < overlapEnd.getTime()) {
-        lunchOverlapMs = overlapEnd.getTime() - overlapStart.getTime();
+      if (!isHalfDay && !isFullHoliday) {
+        const overlapStart = new Date(Math.max(effectiveStartTime.getTime(), lunchStart.getTime()));
+        const overlapEnd = new Date(Math.min(regularWindowEnd.getTime(), lunchEnd.getTime()));
+
+        if (overlapStart.getTime() < overlapEnd.getTime()) {
+          lunchOverlapMs = overlapEnd.getTime() - overlapStart.getTime();
+        }
       }
 
-      // Calculate Short Leave deduction (time away from work for bank, docs, home, etc.)
+      // Calculate Short Leave deduction (time away from work for bank, docs, home, etc.) within regular window
       let shortLeaveDeductionMs = 0;
       const allShortLeaves: ShortLeaveSession[] = [...(todayRecord.shortLeaveSessions || [])];
       if (todayRecord.activeShortLeaveStart) {
@@ -642,21 +692,27 @@ export default function Home() {
         const sEnd = s.end ? new Date(s.end).getTime() : now.getTime();
         if (sEnd > sStart) {
           const winStart = Math.max(effectiveStartTime.getTime(), sStart);
-          const winEnd = Math.min(now.getTime(), sEnd);
+          const winEnd = Math.min(regularWindowEnd.getTime(), sEnd);
           if (winEnd > winStart) {
             let spanMs = winEnd - winStart;
-            const lunchWinStart = Math.max(winStart, lunchStart.getTime());
-            const lunchWinEnd = Math.min(winEnd, lunchEnd.getTime());
-            if (lunchWinEnd > lunchWinStart) {
-              spanMs -= (lunchWinEnd - lunchWinStart);
+            if (!isHalfDay && !isFullHoliday) {
+              const lunchWinStart = Math.max(winStart, lunchStart.getTime());
+              const lunchWinEnd = Math.min(winEnd, lunchEnd.getTime());
+              if (lunchWinEnd > lunchWinStart) {
+                spanMs -= (lunchWinEnd - lunchWinStart);
+              }
             }
             shortLeaveDeductionMs += Math.max(0, spanMs);
           }
         }
       });
 
-      // Work time: elapsed time after 9 AM minus lunch break minus excess break beyond allowed limit minus short leave
-      const workedMs = Math.max(0, elapsedMs - lunchOverlapMs - excessRestMs - shortLeaveDeductionMs);
+      // Regular shift worked ms + covered approved late ms (capped at targetRequiredHours)
+      const targetReqHours = isHalfDay ? 4 : (isFullHoliday ? 0 : 8);
+      const targetReqMs = targetReqHours * 3600 * 1000;
+      const baseWorkedMs = Math.max(0, regularElapsedMs - lunchOverlapMs - excessRestMs - shortLeaveDeductionMs);
+      const coveredLateMs = coveredLateMinutes * 60 * 1000;
+      const workedMs = targetReqMs > 0 ? Math.min(targetReqMs, baseWorkedMs + coveredLateMs) : (baseWorkedMs + coveredLateMs);
 
       // Calculate running active break timer
       let activeBreakMs = 0;
@@ -706,7 +762,7 @@ export default function Home() {
         timerRef.current = null;
       }
     };
-  }, [todayRecord]);
+  }, [todayRecord, holidays]);
 
   // Formatter: Milliseconds to HH:MM:SS
   const formatMsToHMS = (ms: number): string => {
@@ -761,16 +817,22 @@ export default function Home() {
       return;
     }
     const dateStr = getTodayDateString();
+    const todayHoliday = holidays.find((h) => h.date === dateStr);
+    const holidayType = todayHoliday?.type;
+    const isHalfDay = holidayType === 'half-before-lunch' || holidayType === 'half-after-lunch';
+    const initialPending = isHalfDay ? 4 : (holidayType === 'full' ? 0 : 8);
+
     const newRecord: DayRecord = {
       date: dateStr,
       status: 'present',
+      holidayType: holidayType,
       inTime: now.toISOString(),
       outTime: null,
       restSessions: [],
       restTimeTotal: 0,
       activeRestStart: null,
       workedHours: 0,
-      pendingHours: 8,
+      pendingHours: initialPending,
       allowedRestLimit: defaultDailyRestLimit,
     };
 
@@ -1370,16 +1432,22 @@ export default function Home() {
       return;
     }
 
+    const todayHoliday = holidays.find((h) => h.date === todayStrLocal);
+    const holidayType = todayHoliday?.type;
+    const isHalfDay = holidayType === 'half-before-lunch' || holidayType === 'half-after-lunch';
+    const initialPending = isHalfDay ? 4 : (holidayType === 'full' ? 0 : 8);
+
     const newRecord: DayRecord = {
       date: todayStrLocal,
       status: 'present',
+      holidayType: holidayType,
       inTime: inDate.toISOString(),
       outTime: null,
       restSessions: [],
       restTimeTotal: 0,
       activeRestStart: null,
       workedHours: 0,
-      pendingHours: 8,
+      pendingHours: initialPending,
       allowedRestLimit: defaultDailyRestLimit,
     };
 
@@ -1390,16 +1458,22 @@ export default function Home() {
 
   const handleMarkAbsentToday = async () => {
     const dateStr = getTodayDateString();
+    const todayHoliday = holidays.find((h) => h.date === dateStr);
+    const holidayType = todayHoliday?.type;
+    const isHalfDay = holidayType === 'half-before-lunch' || holidayType === 'half-after-lunch';
+    const absentPending = isHalfDay ? 4 : (holidayType === 'full' ? 0 : 8);
+
     const newRecord: DayRecord = {
       date: dateStr,
       status: 'absent',
+      holidayType: holidayType,
       inTime: null,
       outTime: null,
       restSessions: [],
       restTimeTotal: 0,
       activeRestStart: null,
       workedHours: 0,
-      pendingHours: 8,
+      pendingHours: absentPending,
     };
 
     await saveRecordApi(newRecord);
@@ -1476,11 +1550,13 @@ export default function Home() {
   };
 
   const saveRecordApi = async (record: DayRecord) => {
+    const holiday = holidays.find((h) => h.date === record.date);
     const recordToCalculate: DayRecord = {
       ...record,
+      holidayType: record.holidayType || holiday?.type,
       allowedRestLimit: record.allowedRestLimit !== undefined ? record.allowedRestLimit : defaultDailyRestLimit,
     };
-    const updatedRecord = calculateRecordHours(recordToCalculate, undefined, defaultDailyRestLimit);
+    const updatedRecord = calculateRecordHours(recordToCalculate, undefined, defaultDailyRestLimit, holiday);
     if (user) {
       try {
         const recordRef = ref(db, `records/${user.uid}/${updatedRecord.date}`);
@@ -1574,6 +1650,8 @@ export default function Home() {
     setNewBreakEnd('');
     
     if (record) {
+      const existingHoliday = holidays.find((h) => h.date === dateStr);
+      setModalHolidayType(record.holidayType || existingHoliday?.type || 'none');
       setModalStatus(record.status);
       setModalRestTime(Math.round(record.restTimeTotal));
       setModalRestSessions(record.restSessions || []);
@@ -1582,6 +1660,8 @@ export default function Home() {
       setNewShortLeaveEnd('');
       setNewShortLeaveReason('Bank Work');
       setModalNotes(record.notes || '');
+      setModalIsLateApproved(Boolean(record.isLateApproved));
+      setModalLateReason(record.lateReason || '');
 
       if (record.status === 'present' && record.inTime) {
         const inDate = new Date(record.inTime);
@@ -1603,8 +1683,11 @@ export default function Home() {
       }
     } else {
       // Pre-populate empty day
-      const isHoliday = holidays.some((h) => h.date === dateStr);
-      setModalStatus(isHoliday ? 'holiday' : (new Date(dateStr).getDay() === 0 ? 'weekly-off' : 'present'));
+      const existingHoliday = holidays.find((h) => h.date === dateStr);
+      const isHoliday = !!existingHoliday;
+      const isHalfDay = existingHoliday?.type === 'half-before-lunch' || existingHoliday?.type === 'half-after-lunch';
+      setModalHolidayType(existingHoliday?.type || (isHoliday ? 'full' : 'none'));
+      setModalStatus(isHoliday ? (isHalfDay ? 'present' : 'holiday') : (new Date(dateStr).getDay() === 0 ? 'weekly-off' : 'present'));
       setModalInTime('09:00');
       setModalOutTime('17:20');
       setModalRestTime(20);
@@ -1614,6 +1697,8 @@ export default function Home() {
       setNewShortLeaveEnd('');
       setNewShortLeaveReason('Bank Work');
       setModalNotes('');
+      setModalIsLateApproved(false);
+      setModalLateReason('');
     }
     
     setShowModal(true);
@@ -1751,9 +1836,15 @@ export default function Home() {
       return;
     }
 
+    const effectiveHolidayType = modalHolidayType !== 'none' ? modalHolidayType : undefined;
+    const isHalfDay = effectiveHolidayType === 'half-before-lunch' || effectiveHolidayType === 'half-after-lunch';
+    const isFullHoliday = effectiveHolidayType === 'full' || (!effectiveHolidayType && modalStatus === 'holiday');
+    const targetRequired = isHalfDay ? 4 : (isFullHoliday ? 0 : 8);
+
     let record: DayRecord = {
       date: modalDate,
       status: modalStatus,
+      holidayType: effectiveHolidayType,
       inTime: null,
       outTime: null,
       restSessions: [],
@@ -1763,8 +1854,10 @@ export default function Home() {
       shortLeaveTotal: 0,
       activeShortLeaveStart: null,
       workedHours: 0,
-      pendingHours: modalStatus === 'absent' ? 8 : 0,
+      pendingHours: modalStatus === 'absent' ? targetRequired : 0,
       notes: modalNotes,
+      isLateApproved: modalIsLateApproved,
+      lateReason: modalLateReason,
     };
 
     if (modalStatus === 'present') {
@@ -1907,6 +2000,10 @@ export default function Home() {
   let consoleStatusText = 'Not Checked In';
   let clockCardClass = styles.clockCard;
 
+  const todayDateStr = getTodayDateString();
+  const todayHolidayObj = holidays.find((h) => h.date === todayDateStr);
+  const todayHolidayType = todayRecord?.holidayType || todayHolidayObj?.type;
+
   if (todayRecord) {
     if (todayRecord.status === 'absent') {
       consoleStatusText = 'Absent Today';
@@ -1920,7 +2017,11 @@ export default function Home() {
         consoleStatusClass = styles.statusResting;
         clockCardClass = `${styles.clockCard} ${styles.clockCardActiveRest}`;
       } else {
-        consoleStatusText = 'Working';
+        consoleStatusText = todayHolidayType === 'half-before-lunch' 
+          ? 'Working (Half Leave: Before Lunch)' 
+          : todayHolidayType === 'half-after-lunch' 
+          ? 'Working (Half Leave: After Lunch)' 
+          : 'Working';
         consoleStatusClass = styles.statusWorking;
         clockCardClass = `${styles.clockCard} ${styles.clockCardActiveWork}`;
       }
@@ -1941,10 +2042,20 @@ export default function Home() {
     let weeklyOffDays = 0;
     let hoursWorkedTotal = 0;
     let pendingHoursTotal = 0;
+    let totalLateMinutes = 0;
+    let unapprovedLateMinutesTotal = 0;
+    let approvedLateMinutesTotal = 0;
+    let coveredLateMinutesTotal = 0;
+    let afterSixMinutesTotal = 0;
+    let leaveCoverMinutesTotal = 0;
+    let leaveHoursTotal = 0;
 
     filteredRecords.forEach((record) => {
       const isToday = record.date === todayStr;
-      const isHoliday = holidays.some((h) => h.date === record.date);
+      const holiday = holidays.find((h) => h.date === record.date);
+      const holidayType = record.holidayType || holiday?.type;
+      const isHalfDay = holidayType === 'half-before-lunch' || holidayType === 'half-after-lunch';
+      const isFullHoliday = holidayType === 'full' || (!holidayType && (!!holiday || record.status === 'holiday'));
       
       let worked = record.workedHours;
       if (isToday && record.status === 'present' && !record.outTime) {
@@ -1953,20 +2064,60 @@ export default function Home() {
 
       if (record.status === 'present') {
         presentDays++;
-        if (!isHoliday) {
-          totalWorkDays++;
+        if (isHalfDay) {
+          totalWorkDays += 0.5;
           if (isToday && !record.outTime) {
-            pendingHoursTotal += (8 - liveWorkedHoursDecimal);
+            pendingHoursTotal += Math.max(0, 4 - liveWorkedHoursDecimal);
           } else {
-            pendingHoursTotal += (record.pendingHours !== undefined ? record.pendingHours : (8 - worked));
+            pendingHoursTotal += (record.pendingHours !== undefined ? record.pendingHours : Math.max(0, 4 - worked));
+          }
+        } else if (!isFullHoliday) {
+          totalWorkDays += 1;
+          if (isToday && !record.outTime) {
+            pendingHoursTotal += Math.max(0, 8 - liveWorkedHoursDecimal);
+          } else {
+            pendingHoursTotal += (record.pendingHours !== undefined ? record.pendingHours : Math.max(0, 8 - worked));
           }
         }
         hoursWorkedTotal += worked;
+
+        if (isToday && !record.outTime) {
+          const inTime = record.inTime ? new Date(record.inTime) : null;
+          let lateMins = 0;
+          if (inTime) {
+            const shiftStartStr = isHalfDay && holidayType === 'half-before-lunch' ? '14:00:00' : '09:00:00';
+            const shiftStart = new Date(`${record.date}T${shiftStartStr}`);
+            if (inTime.getTime() > shiftStart.getTime()) {
+              lateMins = Math.round((inTime.getTime() - shiftStart.getTime()) / 60000);
+            }
+          }
+          const isLateApproved = Boolean(record.isLateApproved);
+          totalLateMinutes += lateMins;
+          if (isLateApproved) {
+            approvedLateMinutesTotal += lateMins;
+          } else {
+            unapprovedLateMinutesTotal += lateMins;
+          }
+          afterSixMinutesTotal += liveAfterSixMins;
+          leaveCoverMinutesTotal += liveLeaveCoverMins;
+        } else {
+          totalLateMinutes += record.lateMinutes || 0;
+          unapprovedLateMinutesTotal += record.unapprovedLateMinutes || 0;
+          approvedLateMinutesTotal += record.approvedLateMinutes || 0;
+          coveredLateMinutesTotal += record.coveredLateMinutes || 0;
+          afterSixMinutesTotal += record.afterSixMinutes || 0;
+          leaveCoverMinutesTotal += record.leaveCoverMinutes || 0;
+        }
       } else if (record.status === 'absent') {
         absentDays++;
-        if (!isHoliday) {
-          totalWorkDays++;
+        if (isHalfDay) {
+          totalWorkDays += 0.5;
+          pendingHoursTotal += 4;
+          leaveHoursTotal += 4;
+        } else if (!isFullHoliday) {
+          totalWorkDays += 1;
           pendingHoursTotal += 8;
+          leaveHoursTotal += 8;
         }
       } else if (record.status === 'weekly-off') {
         weeklyOffDays++;
@@ -1974,13 +2125,25 @@ export default function Home() {
           hoursWorkedTotal += worked;
         }
       } else if (record.status === 'holiday') {
-        if (worked > 0) {
-          hoursWorkedTotal += worked;
+        if (isHalfDay) {
+          totalWorkDays += 0.5;
+          if (worked > 0) {
+            hoursWorkedTotal += worked;
+            pendingHoursTotal += (record.pendingHours !== undefined ? record.pendingHours : (4 - worked));
+          } else {
+            pendingHoursTotal += 4;
+          }
+        } else {
+          if (worked > 0) {
+            hoursWorkedTotal += worked;
+          }
         }
       }
     });
 
     const requiredHoursTotal = totalWorkDays * 8;
+    const leaveCoverHoursTotal = parseFloat((leaveCoverMinutesTotal / 60).toFixed(2));
+    const remainingLeaveHours = Math.max(0, parseFloat((leaveHoursTotal - leaveCoverHoursTotal).toFixed(2)));
 
     return {
       totalWorkDays,
@@ -1990,6 +2153,14 @@ export default function Home() {
       requiredHoursTotal: parseFloat(requiredHoursTotal.toFixed(2)),
       hoursWorkedTotal: parseFloat(hoursWorkedTotal.toFixed(2)),
       pendingHoursTotal: parseFloat(pendingHoursTotal.toFixed(2)),
+      totalLateMinutes,
+      unapprovedLateMinutesTotal,
+      approvedLateMinutesTotal,
+      coveredLateMinutesTotal,
+      afterSixMinutesTotal,
+      leaveHoursTotal,
+      leaveCoverHoursTotal,
+      remainingLeaveHours,
     };
   };
 
@@ -2160,6 +2331,28 @@ export default function Home() {
                 'Clock in to start tracking worked hours'
               )}
             </div>
+
+            {todayRecord && todayRecord.status === 'present' && (
+              <div style={{ marginTop: '0.65rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+                {todayRecord.lateMinutes && todayRecord.lateMinutes > 0 ? (
+                  todayRecord.isLateApproved ? (
+                    <span className={styles.badgeApproved} title="Approved late arrival - can be covered after 6:00 PM">
+                      ✅ {todayRecord.lateMinutes}m Late (Approved)
+                    </span>
+                  ) : (
+                    <span className={styles.badgeCut} title="Unapproved late arrival cuts directly from salary">
+                      ⚠️ {todayRecord.lateMinutes}m Late (Salary Cut)
+                    </span>
+                  )
+                ) : null}
+
+                {(liveAfterSixMins > 0 || (todayRecord.afterSixMinutes && todayRecord.afterSixMinutes > 0)) ? (
+                  <span className={styles.badgeCover} title="Time worked past 6:00 PM deducts from monthly leave hours">
+                    🌙 Past 6 PM: +{liveAfterSixMins || todayRecord.afterSixMinutes}m ({liveLeaveCoverMins || todayRecord.leaveCoverMinutes || 0}m Leave Cover)
+                  </span>
+                ) : null}
+              </div>
+            )}
 
             {/* Rest Limit Progress Bar */}
             {todayRecord && todayRecord.status === 'present' && (
@@ -2402,11 +2595,22 @@ export default function Home() {
                 )}
                 <div className={styles.quickStat}>
                   <div className={styles.quickStatLabel}>Pending</div>
-                  <div className={styles.quickStatVal} style={{ color: (todayRecord.outTime ? todayRecord.pendingHours : (8 - liveWorkedHoursDecimal)) <= 0 ? 'var(--color-present)' : 'var(--color-absent)' }}>
-                    {todayRecord.outTime
-                      ? (todayRecord.pendingHours <= 0 ? '0h 0m' : formatHoursToText(todayRecord.pendingHours))
-                      : ((8 - liveWorkedHoursDecimal) <= 0 ? '0h 0m' : formatHoursToText(8 - liveWorkedHoursDecimal))}
-                  </div>
+                  {(() => {
+                    const todayHoliday = holidays.find((h) => h.date === todayRecord.date);
+                    const effectiveHolidayType = todayRecord.holidayType || todayHoliday?.type;
+                    const isHalfDay = effectiveHolidayType === 'half-before-lunch' || effectiveHolidayType === 'half-after-lunch';
+                    const isFullHoliday = effectiveHolidayType === 'full' || (!effectiveHolidayType && !!todayHoliday);
+                    const targetTodayHours = isHalfDay ? 4 : (isFullHoliday ? 0 : 8);
+                    const pendingVal = todayRecord.outTime ? todayRecord.pendingHours : (targetTodayHours - liveWorkedHoursDecimal);
+
+                    return (
+                      <div className={styles.quickStatVal} style={{ color: pendingVal <= 0 ? 'var(--color-present)' : 'var(--color-absent)' }}>
+                        {todayRecord.outTime
+                          ? (todayRecord.pendingHours <= 0 ? (todayRecord.pendingHours < 0 ? `+${formatHoursToText(Math.abs(todayRecord.pendingHours))}` : '0h 0m') : formatHoursToText(todayRecord.pendingHours))
+                          : (pendingVal <= 0 ? (pendingVal < 0 ? `+${formatHoursToText(Math.abs(pendingVal))}` : '0h 0m') : formatHoursToText(pendingVal))}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             )}
@@ -2584,6 +2788,38 @@ export default function Home() {
                 {displayStats.pendingHoursTotal > 0 ? 'Hours remaining to meet quota' : 'Extra hours accumulated'}
               </div>
             </div>
+
+            <div className={`${styles.glass} ${styles.statCard}`}>
+              <div className={styles.statCardHeader}>
+                <span>Leave Hours Remaining</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+              </div>
+              <div 
+                className={styles.statValue} 
+                style={{ color: (displayStats.remainingLeaveHours || 0) > 0 ? 'var(--color-warning)' : 'var(--color-present)' }}
+              >
+                {formatHoursToText(displayStats.remainingLeaveHours || 0)}
+              </div>
+              <div className={styles.statSubtext}>
+                {displayStats.leaveHoursTotal || 0}h leave quota - {Math.round((displayStats.leaveCoverHoursTotal || 0) * 60)}m covered after 6 PM
+              </div>
+            </div>
+
+            <div className={`${styles.glass} ${styles.statCard}`}>
+              <div className={styles.statCardHeader}>
+                <span>Salary Cut (Late)</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              </div>
+              <div 
+                className={styles.statValue} 
+                style={{ color: (displayStats.unapprovedLateMinutesTotal || 0) > 0 ? 'var(--color-absent)' : 'var(--color-present)' }}
+              >
+                {displayStats.unapprovedLateMinutesTotal || 0} mins
+              </div>
+              <div className={styles.statSubtext}>
+                Unapproved late cuts | Approved: {displayStats.approvedLateMinutesTotal || 0}m
+              </div>
+            </div>
           </div>
 
           {/* Calendar Month View */}
@@ -2631,8 +2867,16 @@ export default function Home() {
                     let restLabel = '';
                     let holidayLabel = '';
 
-                    if (holiday) {
-                      holidayLabel = `🎉 ${holiday.name}`;
+                    const effectiveHolidayType = record?.holidayType || holiday?.type;
+                    if (holiday || effectiveHolidayType) {
+                      const name = holiday ? holiday.name : 'Holiday';
+                      if (effectiveHolidayType === 'half-before-lunch') {
+                        holidayLabel = `🌓 ${name} (Half: Before Lunch)`;
+                      } else if (effectiveHolidayType === 'half-after-lunch') {
+                        holidayLabel = `🌗 ${name} (Half: After Lunch)`;
+                      } else {
+                        holidayLabel = `🎉 ${name}`;
+                      }
                     }
 
                     if (record) {
@@ -2652,11 +2896,11 @@ export default function Home() {
                         label = 'Weekly Off';
                       } else if (record.status === 'holiday') {
                         statusClass = styles.dayWeeklyOff;
-                        label = 'Holiday';
+                        label = effectiveHolidayType?.startsWith('half') ? 'Half Leave' : 'Holiday';
                       }
                     } else if (holiday) {
                       statusClass = styles.dayWeeklyOff;
-                      label = 'Holiday';
+                      label = effectiveHolidayType === 'half-before-lunch' ? 'Half Leave (AM)' : effectiveHolidayType === 'half-after-lunch' ? 'Half Leave (PM)' : 'Holiday';
                     } else if (isSunday) {
                       statusClass = styles.dayWeeklyOff;
                       label = 'Weekly Off';
@@ -2680,6 +2924,8 @@ export default function Home() {
                                 ? styles.dayHoursLabel 
                                 : record?.status === 'absent'
                                 ? styles.dayStatusPill + ' ' + styles.dayPillAbsent
+                                : effectiveHolidayType?.startsWith('half')
+                                ? styles.dayStatusPill + ' ' + styles.dayPillHalfLeave
                                 : record?.status === 'holiday' || (!record && holiday)
                                 ? styles.dayStatusPill + ' ' + styles.dayPillHoliday
                                 : styles.dayStatusPill + ' ' + styles.dayPillWeeklyOff
@@ -2715,6 +2961,8 @@ export default function Home() {
                     <th>Early Time</th>
                     <th>Break Time</th>
                     <th>Lunch Break</th>
+                    <th>Late (Salary Cut)</th>
+                    <th>After 6 PM (Leave Cover)</th>
                     <th>Hours Worked</th>
                     <th>Actions</th>
                   </tr>
@@ -2722,7 +2970,7 @@ export default function Home() {
                 <tbody>
                   {filteredRecords.length === 0 ? (
                     <tr>
-                      <td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
+                      <td colSpan={11} style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
                         No records logged in the selected date range.
                       </td>
                     </tr>
@@ -2738,12 +2986,16 @@ export default function Home() {
                           <td>
                             <span className={`${styles.badge} ${
                               record.status === 'present'
-                                ? styles.badgePresent
+                                ? (record.holidayType?.startsWith('half') ? styles.badgeHalfLeave : styles.badgePresent)
                                 : record.status === 'absent'
                                 ? styles.badgeAbsent
                                 : styles.badgeWeeklyOff
                             }`}>
-                              {record.status}
+                              {record.status === 'present' && record.holidayType === 'half-before-lunch'
+                                ? 'Half: AM'
+                                : record.status === 'present' && record.holidayType === 'half-after-lunch'
+                                ? 'Half: PM'
+                                : record.status}
                             </span>
                           </td>
                           <td>{formatISOToTime(record.inTime)}</td>
@@ -2768,7 +3020,45 @@ export default function Home() {
                               </div>
                             )}
                           </td>
-                          <td>{record.status === 'present' ? `${record.lunchDeduction ? Math.round(record.lunchDeduction) : 0} mins` : '--'}</td>
+                          <td>
+                            {record.status === 'present'
+                              ? (record.holidayType?.startsWith('half')
+                                ? '0 mins (Half Day)'
+                                : `${record.lunchDeduction ? Math.round(record.lunchDeduction) : 0} mins`)
+                              : '--'}
+                          </td>
+                          <td>
+                            {record.status === 'present' ? (
+                              record.lateMinutes && record.lateMinutes > 0 ? (
+                                record.isLateApproved ? (
+                                  <span className={styles.badgeApproved} title={record.lateReason || 'Late approved by admin'}>
+                                    0m (Approved {record.lateMinutes}m)
+                                  </span>
+                                ) : (
+                                  <span className={styles.badgeCut} title="Unapproved late cuts directly from salary">
+                                    ⚠️ {record.lateMinutes}m Cut
+                                  </span>
+                                )
+                              ) : (
+                                '--'
+                              )
+                            ) : (
+                              '--'
+                            )}
+                          </td>
+                          <td>
+                            {record.status === 'present' ? (
+                              record.afterSixMinutes && record.afterSixMinutes > 0 ? (
+                                <span className={styles.badgeCover} title="Time past 6 PM deducts from monthly leave hours">
+                                  🌙 +{record.afterSixMinutes}m ({record.leaveCoverMinutes || 0}m Cover)
+                                </span>
+                              ) : (
+                                '--'
+                              )
+                            ) : (
+                              '--'
+                            )}
+                          </td>
                           <td style={{ fontWeight: 'bold', color: record.status === 'present' ? 'var(--color-present)' : 'inherit' }}>
                             {record.status === 'present'
                               ? formatHoursToText(currentWorkedHours)
@@ -2821,6 +3111,20 @@ export default function Home() {
                 </select>
               </div>
 
+              <div className={styles.formGroup}>
+                <label className={styles.formLabel}>Holiday / Half Leave Type</label>
+                <select
+                  className={styles.formSelect}
+                  value={modalHolidayType}
+                  onChange={(e) => setModalHolidayType(e.target.value as any)}
+                >
+                  <option value="none">Regular Working Day (8h standard)</option>
+                  <option value="full">Full Day Holiday (0h required)</option>
+                  <option value="half-before-lunch">Half Leave - Before Lunch (4h required, No lunch deduction)</option>
+                  <option value="half-after-lunch">Half Leave - After Lunch (4h required, No lunch deduction)</option>
+                </select>
+              </div>
+
               {modalStatus === 'present' && (
                 <>
                   <div className={styles.formRow}>
@@ -2846,6 +3150,50 @@ export default function Home() {
                       />
                     </div>
                   </div>
+
+                  {(() => {
+                    const shiftStartStr = modalHolidayType === 'half-before-lunch' ? '14:00' : '09:00';
+                    const isLate = modalInTime > shiftStartStr;
+                    if (!isLate) return null;
+                    return (
+                      <div style={{
+                        marginTop: '0.75rem',
+                        marginBottom: '1rem',
+                        padding: '0.75rem 1rem',
+                        borderRadius: '8px',
+                        background: modalIsLateApproved ? 'rgba(34, 197, 94, 0.08)' : 'rgba(239, 68, 68, 0.08)',
+                        border: `1px solid ${modalIsLateApproved ? 'rgba(34, 197, 94, 0.25)' : 'rgba(239, 68, 68, 0.25)'}`,
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                          <span style={{ fontSize: '0.85rem', fontWeight: 600, color: modalIsLateApproved ? '#4ade80' : '#f87171' }}>
+                            {modalIsLateApproved ? '✅ Late Arrival Approved' : '⚠️ Late Arrival (Unapproved)'}
+                          </span>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer', fontSize: '0.85rem', color: '#e2e8f0' }}>
+                            <input
+                              type="checkbox"
+                              checked={modalIsLateApproved}
+                              onChange={(e) => setModalIsLateApproved(e.target.checked)}
+                              style={{ width: '16px', height: '16px', accentColor: '#22c55e', cursor: 'pointer' }}
+                            />
+                            Approve Late Arrival
+                          </label>
+                        </div>
+                        <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                          {modalIsLateApproved
+                            ? 'Approved late time can be covered by working after 6:00 PM without salary cut.'
+                            : 'Unapproved late time is cut from salary. Time worked after 6:00 PM deducts from monthly leave hours.'}
+                        </p>
+                        <input
+                          type="text"
+                          placeholder="Reason for late arrival (optional note)..."
+                          value={modalLateReason}
+                          onChange={(e) => setModalLateReason(e.target.value)}
+                          className={styles.formInput}
+                          style={{ fontSize: '0.82rem', padding: '0.4rem 0.6rem' }}
+                        />
+                      </div>
+                    );
+                  })()}
 
                   <div className={styles.formGroup}>
                     <label className={styles.formLabel}>Total Rest Time (Minutes)</label>
@@ -3009,7 +3357,11 @@ export default function Home() {
 
               {modalStatus === 'present' && (
                 <div className={styles.manualNote}>
-                  💡 <strong>Calculation Note:</strong> Net work hours will be calculated as <code>(Clock Out - Clock In) - (Lunch Break overlap, max 1h) - Math.max(0, Rest Time - 20 minutes)</code>.
+                  💡 <strong>Calculation Note:</strong> {modalHolidayType === 'half-before-lunch' || modalHolidayType === 'half-after-lunch' ? (
+                    <>Half Day Shift (4h required). Lunch break is <strong>NOT</strong> deducted, so leaving after 1:00 PM (e.g. leaving at 1:45 PM) fully counts towards your working time (e.g. 45 mins work time).</>
+                  ) : (
+                    <>Net work hours will be calculated as <code>(Clock Out - Clock In) - (Lunch Break overlap, max 1h) - Math.max(0, Rest Time - 20 minutes)</code>.</>
+                  )}
                 </div>
               )}
 

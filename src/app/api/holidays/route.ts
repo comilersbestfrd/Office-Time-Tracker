@@ -17,7 +17,11 @@ export async function POST(request: Request) {
     if (!body.date || !body.name) {
       return NextResponse.json({ error: 'Date and Name are required fields' }, { status: 400 });
     }
-    const updated = await saveHoliday(body);
+    const holidayData = {
+      ...body,
+      type: body.type || 'full',
+    };
+    const updated = await saveHoliday(holidayData);
     return NextResponse.json(updated);
   } catch (error) {
     console.error('Error saving holiday:', error);
