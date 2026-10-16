@@ -93,6 +93,8 @@ export default function Home() {
   const [showManualStartModal, setShowManualStartModal] = useState<boolean>(false);
   const [manualInPunch, setManualInPunch] = useState<string>('');
   const [modalDate, setModalDate] = useState<string>('');
+  type AttendanceChoice = 'present' | 'absent' | 'half-after-lunch' | 'half-before-lunch';
+  const [modalAttendanceChoice, setModalAttendanceChoice] = useState<AttendanceChoice>('present');
   const [modalStatus, setModalStatus] = useState<'present' | 'absent' | 'weekly-off' | 'holiday'>('present');
   const [modalHolidayType, setModalHolidayType] = useState<HolidayType | 'none'>('none');
   const [modalInTime, setModalInTime] = useState<string>('09:00');
@@ -730,7 +732,10 @@ export default function Home() {
       const targetReqMs = targetReqHours * 3600 * 1000;
       const baseWorkedMs = Math.max(0, regularElapsedMs - lunchOverlapMs - excessRestMs - shortLeaveDeductionMs);
       const coveredLateMs = coveredLateMinutes * 60 * 1000;
-      const workedMs = targetReqMs > 0 ? Math.min(targetReqMs, baseWorkedMs + coveredLateMs) : (baseWorkedMs + coveredLateMs);
+      const extraWorkedMs = isHalfDay ? (afterSixMinutes * 60 * 1000) : 0;
+      const workedMs = isHalfDay
+        ? (baseWorkedMs + extraWorkedMs)
+        : (targetReqMs > 0 ? Math.min(targetReqMs, baseWorkedMs + coveredLateMs) : (baseWorkedMs + coveredLateMs));
 
       // Calculate running active break timer
       let activeBreakMs = 0;
@@ -1669,7 +1674,17 @@ export default function Home() {
     
     if (record) {
       const existingHoliday = holidays.find((h) => h.date === dateStr);
-      setModalHolidayType(record.holidayType || existingHoliday?.type || 'none');
+      const effectiveType = record.holidayType || existingHoliday?.type;
+      if (record.status === 'absent') {
+        setModalAttendanceChoice('absent');
+      } else if (effectiveType === 'half-after-lunch') {
+        setModalAttendanceChoice('half-after-lunch');
+      } else if (effectiveType === 'half-before-lunch') {
+        setModalAttendanceChoice('half-before-lunch');
+      } else {
+        setModalAttendanceChoice('present');
+      }
+      setModalHolidayType(effectiveType || 'none');
       setModalStatus(record.status);
       setModalRestTime(Math.round(record.restTimeTotal));
       setModalRestSessions(record.restSessions || []);
@@ -1696,18 +1711,29 @@ export default function Home() {
           setModalOutTime(''); // Blank if currently working
         }
       } else {
-        setModalInTime('09:00');
-        setModalOutTime('17:20');
+        setModalInTime(effectiveType === 'half-before-lunch' ? '14:00' : '09:00');
+        setModalOutTime(effectiveType === 'half-after-lunch' ? '13:00' : '18:00');
       }
     } else {
       // Pre-populate empty day
       const existingHoliday = holidays.find((h) => h.date === dateStr);
-      const isHoliday = !!existingHoliday;
-      const isHalfDay = existingHoliday?.type === 'half-before-lunch' || existingHoliday?.type === 'half-after-lunch';
-      setModalHolidayType(existingHoliday?.type || (isHoliday ? 'full' : 'none'));
-      setModalStatus(isHoliday ? (isHalfDay ? 'present' : 'holiday') : (new Date(dateStr).getDay() === 0 ? 'weekly-off' : 'present'));
-      setModalInTime('09:00');
-      setModalOutTime('17:20');
+      if (existingHoliday?.type === 'half-after-lunch') {
+        setModalAttendanceChoice('half-after-lunch');
+        setModalHolidayType('half-after-lunch');
+        setModalInTime('09:00');
+        setModalOutTime('13:00');
+      } else if (existingHoliday?.type === 'half-before-lunch') {
+        setModalAttendanceChoice('half-before-lunch');
+        setModalHolidayType('half-before-lunch');
+        setModalInTime('14:00');
+        setModalOutTime('18:00');
+      } else {
+        setModalAttendanceChoice('present');
+        setModalHolidayType('none');
+        setModalInTime('09:00');
+        setModalOutTime('18:00');
+      }
+      setModalStatus('present');
       setModalRestTime(20);
       setModalRestSessions([]);
       setModalShortLeaveSessions([]);
@@ -1854,12 +1880,39 @@ export default function Home() {
       return;
     }
 
-    const existingHoliday = holidays.find((h) => h.date === modalDate);
-    const existingRec = records.find((r) => r.date === modalDate);
-    const effectiveHolidayType = existingRec?.holidayType || existingHoliday?.type || (modalHolidayType !== 'none' ? modalHolidayType : undefined);
+    const isAbsent = modalAttendanceChoice === 'absent';
+    const effectiveHolidayType =
+      modalAttendanceChoice === 'half-after-lunch'
+        ? 'half-after-lunch'
+        : modalAttendanceChoice === 'half-before-lunch'
+        ? 'half-before-lunch'
+        : undefined;
     const isHalfDay = effectiveHolidayType === 'half-before-lunch' || effectiveHolidayType === 'half-after-lunch';
-    const isFullHoliday = effectiveHolidayType === 'full' || (!effectiveHolidayType && !!existingHoliday);
-    const targetRequired = isHalfDay ? 4 : (isFullHoliday ? 0 : 8);
+    const targetRequired = isHalfDay ? 4 : 8;
+
+    if (isAbsent) {
+      const record: DayRecord = {
+        date: modalDate,
+        status: 'absent',
+        holidayType: undefined,
+        inTime: null,
+        outTime: null,
+        restSessions: [],
+        restTimeTotal: 0,
+        activeRestStart: null,
+        shortLeaveSessions: [],
+        shortLeaveTotal: 0,
+        activeShortLeaveStart: null,
+        workedHours: 0,
+        pendingHours: 8,
+        notes: modalNotes,
+        isLateApproved: false,
+        lateReason: '',
+      };
+      await saveRecordApi(record);
+      setShowModal(false);
+      return;
+    }
 
     let record: DayRecord = {
       date: modalDate,
@@ -2084,6 +2137,9 @@ export default function Home() {
         presentDays++;
         if (isHalfDay) {
           totalWorkDays += 0.5;
+          if (record.date >= NEW_POLICY_START_DATE) {
+            leaveHoursTotal += 4;
+          }
           if (isToday && !record.outTime) {
             pendingHoursTotal += Math.max(0, 4 - liveWorkedHoursDecimal);
           } else {
@@ -3152,7 +3208,40 @@ export default function Home() {
             </div>
 
             <form onSubmit={handleSaveModal}>
-              {modalHolidayType && modalHolidayType !== 'none' ? (
+              <div className={styles.formGroup}>
+                <label className={styles.formLabel}>Attendance & Leave Status</label>
+                <select
+                  className={styles.formSelect}
+                  value={modalAttendanceChoice}
+                  onChange={(e) => {
+                    const choice = e.target.value as AttendanceChoice;
+                    setModalAttendanceChoice(choice);
+                    if (choice === 'half-after-lunch') {
+                      setModalHolidayType('half-after-lunch');
+                      setModalInTime('09:00');
+                      setModalOutTime('13:00');
+                    } else if (choice === 'half-before-lunch') {
+                      setModalHolidayType('half-before-lunch');
+                      setModalInTime('14:00');
+                      setModalOutTime('18:00');
+                    } else if (choice === 'present') {
+                      setModalHolidayType('none');
+                      setModalInTime('09:00');
+                      setModalOutTime('18:00');
+                    } else {
+                      setModalHolidayType('none');
+                    }
+                  }}
+                >
+                  <option value="present">🟢 Full Day Present (Shift 9 AM - 6 PM · 8h · 0h Leave)</option>
+                  <option value="half-after-lunch">🌓 Half Leave - After Lunch (Shift 9 AM - 1 PM · 4h · +4h Leave Hours)</option>
+                  <option value="half-before-lunch">🌓 Half Leave - Before Lunch (Shift 2 PM - 6 PM · 4h · +4h Leave Hours)</option>
+                  <option value="absent">🔴 Full Day Absent (0h worked · +8h Leave Hours)</option>
+                </select>
+              </div>
+
+              {/* Status details banner */}
+              {modalAttendanceChoice === 'half-after-lunch' && (
                 <div style={{
                   marginBottom: '1.25rem',
                   padding: '0.75rem 1rem',
@@ -3167,23 +3256,61 @@ export default function Home() {
                 }}>
                   <span style={{ fontSize: '1.25rem' }}>🌓</span>
                   <div>
-                    <strong>
-                      {modalHolidayType === 'half-after-lunch'
-                        ? 'Official Half Day (After Lunch)'
-                        : modalHolidayType === 'half-before-lunch'
-                        ? 'Official Half Day (Before Lunch)'
-                        : 'Official Public Holiday'}
-                    </strong>
+                    <strong>Half Leave (After Lunch)</strong>
                     <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginTop: '2px' }}>
-                      {modalHolidayType === 'half-after-lunch'
-                        ? 'Official Shift: 9:00 AM - 1:00 PM (4h required). Any time past 1:00 PM covers monthly leave hours.'
-                        : modalHolidayType === 'half-before-lunch'
-                        ? 'Official Shift: 2:00 PM - 6:00 PM (4h required). Any time past 6:00 PM covers monthly leave hours.'
-                        : '0h required (Full Day Public Holiday).'}
+                      Shift: <strong>9:00 AM - 1:00 PM</strong> (4h required). <strong>+4h added to monthly leave hours</strong>. Extra time worked past 1:00 PM (e.g. out at 1:45 PM) counts as 4h 45m worked and deducts 45m from leave hours.
                     </div>
                   </div>
                 </div>
-              ) : (
+              )}
+
+              {modalAttendanceChoice === 'half-before-lunch' && (
+                <div style={{
+                  marginBottom: '1.25rem',
+                  padding: '0.75rem 1rem',
+                  borderRadius: '10px',
+                  background: 'rgba(245, 158, 11, 0.1)',
+                  border: '1px solid rgba(245, 158, 11, 0.25)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.65rem',
+                  color: '#fbbf24',
+                  fontSize: '0.88rem'
+                }}>
+                  <span style={{ fontSize: '1.25rem' }}>🌓</span>
+                  <div>
+                    <strong>Half Leave (Before Lunch)</strong>
+                    <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginTop: '2px' }}>
+                      Shift: <strong>2:00 PM - 6:00 PM</strong> (4h required). <strong>+4h added to monthly leave hours</strong>. Any extra time worked past 6:00 PM deducts from leave hours.
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {modalAttendanceChoice === 'absent' && (
+                <div style={{
+                  marginBottom: '1.25rem',
+                  padding: '0.75rem 1rem',
+                  borderRadius: '10px',
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  border: '1px solid rgba(239, 68, 68, 0.25)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.65rem',
+                  color: '#f87171',
+                  fontSize: '0.88rem'
+                }}>
+                  <span style={{ fontSize: '1.25rem' }}>🔴</span>
+                  <div>
+                    <strong>Full Day Absent / Leave</strong>
+                    <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginTop: '2px' }}>
+                      <strong>+8h added to monthly leave hours quota</strong>. 8h pending hours.
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {modalAttendanceChoice === 'present' && (
                 <div style={{
                   marginBottom: '1.25rem',
                   padding: '0.65rem 0.95rem',
@@ -3197,9 +3324,11 @@ export default function Home() {
                   fontSize: '0.85rem'
                 }}>
                   <span>🕒</span>
-                  <span>Official Shift: <strong>9:00 AM - 6:00 PM</strong> (8h required)</span>
+                  <span>Shift: <strong>9:00 AM - 6:00 PM</strong> (8h required · 0h Leave)</span>
                 </div>
               )}
+
+              {modalAttendanceChoice !== 'absent' && (
                 <>
                   <div className={styles.formRow}>
                     <div className={styles.formGroup} style={{ marginBottom: 0 }}>
@@ -3416,6 +3545,7 @@ export default function Home() {
                     </div>
                   </div>
                 </>
+              )}
 
               <div className={styles.formGroup}>
                 <label className={styles.formLabel}>Notes (Optional)</label>

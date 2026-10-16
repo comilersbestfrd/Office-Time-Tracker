@@ -412,13 +412,18 @@ export function calculateRecordHours(
     leaveCoverMinutes = afterSixMinutes;
   }
 
-  // Net worked time includes approved late coverage to reach target required hours
+  // Net shift worked time to reach target required hours
   const coveredLateMs = coveredLateMinutes * 60 * 1000;
-  const netWorkedMs = baseShiftWorkedMs + coveredLateMs;
-  const workedHours = targetRequiredHours > 0
-    ? Math.min(targetRequiredHours, netWorkedMs / (1000 * 60 * 60))
-    : (netWorkedMs / (1000 * 60 * 60));
-  const pendingHours = Math.max(0, targetRequiredHours - workedHours);
+  const shiftWorkedMs = baseShiftWorkedMs + coveredLateMs;
+  const shiftWorkedHours = shiftWorkedMs / (1000 * 60 * 60);
+  const pendingHours = Math.max(0, targetRequiredHours - shiftWorkedHours);
+
+  // Total worked hours: for half-day shifts, include the extra time worked past shift end (e.g. 9:00 to 1:45 = 4h 45m / 4.75h)
+  const extraWorkedMs = isHalfDay ? (afterSixMinutes * 60 * 1000) : 0;
+  const totalWorkedMs = baseShiftWorkedMs + extraWorkedMs;
+  const workedHours = isHalfDay
+    ? (totalWorkedMs / (1000 * 60 * 60))
+    : (targetRequiredHours > 0 ? Math.min(targetRequiredHours, shiftWorkedHours) : shiftWorkedHours);
 
   return {
     ...record,
